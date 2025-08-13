@@ -1,5 +1,6 @@
 <script lang="ts">
   import { onMount } from 'svelte';
+  import { settings } from '../../lib/stores/settingsStore';
 
   interface AudioDevice {
     id: string;
@@ -33,10 +34,17 @@
     // Load audio devices and settings
     audioDevices = mockDevices;
     selectedDevice = audioDevices.find(d => d.isDefault)?.id || 'default';
-    console.log('Loading audio settings...');
+    
+    // Subscribe to settings changes
+    const unsubscribe = settings.subscribe(currentSettings => {
+      selectedDevice = currentSettings.audioDevice;
+    });
+    
+    return () => unsubscribe();
   });
 
   function saveAudioSettings() {
+    settings.setAudioDevice(selectedDevice);
     console.log('Saving audio settings...', {
       selectedDevice,
       inputVolume,
@@ -76,6 +84,7 @@
   }
 
   function resetToDefaults() {
+    selectedDevice = 'default';
     inputVolume = 75;
     outputVolume = 50;
     noiseSuppression = true;
@@ -85,6 +94,7 @@
     bufferSize = 256;
     voiceActivityDetection = true;
     silenceThreshold = 30;
+    saveAudioSettings();
   }
 </script>
 

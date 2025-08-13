@@ -112,14 +112,14 @@
 <div class="min-h-screen bg-gray-50 dark:bg-gray-900 transition-colors duration-200 flex">
   <!-- Sidebar -->
   <div class="flex">
-    <div class="bg-white dark:bg-gray-800 border-r border-gray-200 dark:border-gray-700 transition-all duration-300 {sidebarCollapsed ? 'w-16' : 'w-64'}">
+    <div class="bg-white dark:bg-gray-800 border-r border-gray-200 dark:border-gray-700 transition-all duration-300 {sidebarCollapsed ? 'w-20' : 'w-64'}">
       <!-- Sidebar Header -->
       <div class="flex items-center justify-between h-16 px-4 border-b border-gray-200 dark:border-gray-700">
         {#if !sidebarCollapsed}
           <div class="flex items-center space-x-3">
             <div class="w-8 h-8 bg-blue-600 rounded-lg flex items-center justify-center">
-              <svg class="w-5 h-5 text-white" fill="currentColor" viewBox="0 0 20 20">
-                <path fill-rule="evenodd" d="M7 4a3 3 0 616 0v4a3 3 0 11-6 0V4zm4 10.93A7.001 7.001 0 0017 8a1 1 0 10-2 0A5 5 0 715 8a1 1 0 00-2 0 7.001 7.001 0 006 6.93V17H6a1 1 0 100 2h8a1 1 0 100-2h-3v-2.07z" clip-rule="evenodd" />
+              <svg class="w-5 h-5 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                {@html getIcon('microphone')}
               </svg>
             </div>
             <h1 class="text-lg font-semibold text-gray-900 dark:text-white">TalkToMe</h1>
@@ -141,14 +141,14 @@
         {#each navigationItems as item}
           <button
             on:click={() => navigateTo(item.route, item.label)}
-            class="w-full flex items-center px-3 py-2 text-sm font-medium rounded-lg transition-colors duration-200 {
+            class="w-full flex items-center {sidebarCollapsed ? 'px-3 py-3 justify-center' : 'px-3 py-2 justify-start'} text-sm font-medium rounded-lg transition-colors duration-200 {
               $page.route.id === item.route 
                 ? 'bg-blue-100 text-blue-900 dark:bg-blue-900 dark:text-blue-100' 
                 : 'text-gray-700 hover:bg-gray-100 dark:text-gray-300 dark:hover:bg-gray-700'
-            } {sidebarCollapsed ? 'justify-center px-2' : 'justify-start'}"
+            }"
             title={sidebarCollapsed ? item.label : ''}
           >
-            <svg class="w-5 h-5 {sidebarCollapsed ? '' : 'mr-3'}" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <svg class="{sidebarCollapsed ? 'w-8 h-8' : 'w-5 h-5'} {sidebarCollapsed ? '' : 'mr-3'}" fill="none" stroke="currentColor" viewBox="0 0 24 24">
               {@html getIcon(item.icon)}
             </svg>
             {#if !sidebarCollapsed}

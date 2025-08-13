@@ -1,5 +1,6 @@
 <script lang="ts">
   import { onMount } from 'svelte';
+  import { settings } from '../../lib/stores/settingsStore';
 
   interface Language {
     code: string;
@@ -39,10 +40,18 @@
   let quickAccessLanguages = ['en', 'es', 'fr', 'de'];
 
   onMount(() => {
-    console.log('Loading language settings...');
+    // Load current settings
+    const unsubscribe = settings.subscribe(currentSettings => {
+      sourceLanguage = currentSettings.spokenLanguage;
+      targetLanguage = currentSettings.translationLanguage;
+    });
+    
+    return () => unsubscribe();
   });
 
   function saveLanguageSettings() {
+    settings.setSpokenLanguage(sourceLanguage);
+    settings.setTranslationLanguage(targetLanguage);
     console.log('Saving language settings...', {
       sourceLanguage,
       targetLanguage,
@@ -67,6 +76,7 @@
       const temp = sourceLanguage;
       sourceLanguage = targetLanguage;
       targetLanguage = temp;
+      saveLanguageSettings();
     }
   }
 

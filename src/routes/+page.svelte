@@ -2,6 +2,7 @@
   import { onMount } from 'svelte';
   import { invoke } from "@tauri-apps/api/core";
   import { listen } from "@tauri-apps/api/event";
+  import { settings } from '../lib/stores/settingsStore';
   
   let isRecording = false;
   let transcribedText = '';
@@ -74,6 +75,24 @@
         }
       };
     }
+    
+    // Listen for tray menu events
+    const unlistenSpokenLanguage = listen('tray-spoken-language-change', (event) => {
+      const language = event.payload as string;
+      settings.setSpokenLanguage(language);
+      selectedSourceLang = language;
+    });
+    
+    const unlistenTranslationLanguage = listen('tray-translation-language-change', (event) => {
+      const language = event.payload as string;
+      settings.setTranslationLanguage(language);
+      selectedTargetLang = language;
+    });
+    
+    const unlistenAudioDevice = listen('tray-audio-input-change', (event) => {
+      const device = event.payload as string;
+      settings.setAudioDevice(device);
+    });
   });
 
   async function startRecording() {
