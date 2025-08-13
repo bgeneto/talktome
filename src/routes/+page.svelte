@@ -205,11 +205,10 @@
   }
 </script>
 
-<div class="max-w-4xl mx-auto py-8 px-4">
-  <div class="bg-white dark:bg-gray-800 rounded-lg shadow-lg p-8">
-    <div class="text-center mb-8">
-      <p class="text-gray-600 dark:text-gray-400">Voice to Text with Translation</p>
-    </div>
+<div class="bg-white dark:bg-gray-800 rounded-lg shadow-lg p-8 max-w-4xl mx-auto">
+  <div class="text-center mb-8">
+    <p class="text-gray-600 dark:text-gray-400">Voice to Text with Translation</p>
+  </div>
 
       <!-- Recording Button -->
       <div class="flex justify-center mb-8">
@@ -328,7 +327,6 @@
         </div>
       </div>
     </div>
-  </div>
 
 <!-- Notification Toast -->
 {#if showNotification}
