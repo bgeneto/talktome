@@ -3,6 +3,61 @@ use tauri::{
     menu::{MenuBuilder, MenuItemBuilder, SubmenuBuilder},
     Manager, Emitter, AppHandle, State,
 };
+use tauri::async_runtime::block_on;
+use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
+use hound;
+use uuid::Uuid;
+use tokio::time::{sleep, Duration};
+use std::process::Command;
+use std::sync::{Arc, atomic::{AtomicBool, Ordering}};
+
+#[cfg(target_os = "windows")]
+mod windows_audio {
+    use windows::core::Interface;
+    use windows::Win32::Foundation::BOOL;
+    use windows::Win32::Media::Audio::{
+        eConsole, eRender, IAudioEndpointVolume, IMMDeviceEnumerator, MMDeviceEnumerator,
+    };
+    use windows::Win32::System::Com::{CoCreateInstance, CoInitializeEx, CoUninitialize, COINIT_MULTITHREADED, CLSCTX_ALL};
+
+    fn set_system_mute(mute: bool) -> Result<(), String> {
+        unsafe {
+            // Initialize COM for this thread
+            CoInitializeEx(None, COINIT_MULTITHREADED)
+                .map_err(|e| format!("COM init failed: {}", e))?;
+
+            // Create the device enumerator
+            let enumerator: IMMDeviceEnumerator = CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL)
+                .map_err(|e| format!("CoCreateInstance(IMMDeviceEnumerator) failed: {}", e))?;
+
+            // Get default render (output) endpoint for console role
+            let device = enumerator
+                .GetDefaultAudioEndpoint(eRender, eConsole)
+                .map_err(|e| format!("GetDefaultAudioEndpoint failed: {}", e))?;
+
+            // Activate the IAudioEndpointVolume interface
+            let endpoint: IAudioEndpointVolume = device
+                .Activate(&IAudioEndpointVolume::IID, CLSCTX_ALL, None)
+                .map_err(|e| format!("Activate(IAudioEndpointVolume) failed: {}", e))?;
+
+            // Apply mute state
+            endpoint
+                .SetMute(BOOL(mute as i32), std::ptr::null())
+                .ok()
+                .map_err(|e| format!("SetMute failed: {}", e))?;
+
+            CoUninitialize();
+            Ok(())
+        }
+    }
+
+    pub fn mute_system() -> Result<(), String> {
+        set_system_mute(true)
+    }
+    pub fn unmute_system() -> Result<(), String> {
+        set_system_mute(false)
+    }
+}
 use tauri_plugin_global_shortcut::{Code, Modifiers, Shortcut, ShortcutState, GlobalShortcutExt};
 use std::collections::HashMap;
 use std::sync::Mutex;
@@ -166,12 +221,137 @@ async fn register_hotkeys(
     Ok(())
 }
 
-// Command to handle recording state
+ // Command to handle recording state (placeholder – real implementation will be added later)
+ #[tauri::command]
+ fn toggle_recording(_app: tauri::AppHandle) -> Result<bool, String> {
+     // This will be connected to the frontend recording state
+     Ok(true)
+ }
+ 
 #[tauri::command]
-fn toggle_recording(_app: tauri::AppHandle) -> Result<bool, String> {
-    // This will be connected to the frontend recording state
-    Ok(true)
+async fn start_recording(app: AppHandle, device: String, auto_mute: bool) -> Result<String, String> {
+    // 1. Optionally mute system audio
+    #[cfg(target_os = "windows")]
+    if auto_mute {
+        windows_audio::mute_system()?;
+    }
+
+    // 2. Capture PCM audio using cpal (default input device)
+    let host = cpal::default_host();
+    let input_device = host
+        .default_input_device()
+        .ok_or_else(|| "No default input device found".to_string())?;
+    let config = input_device
+        .default_input_config()
+        .map_err(|e| e.to_string())?
+        .config();
+
+    // 3. Write to temporary WAV file
+    let wav_path = std::env::temp_dir().join(format!("talktome_{}.wav", Uuid::new_v4()));
+    let spec = hound::WavSpec {
+        channels: config.channels,
+        sample_rate: config.sample_rate.0,
+        bits_per_sample: 16,
+        sample_format: hound::SampleFormat::Int,
+    };
+    let writer = Arc::new(std::sync::Mutex::new(
+        hound::WavWriter::create(&wav_path, spec).map_err(|e| e.to_string())?,
+    ));
+
+    // Recording control flag
+    let recording = Arc::new(AtomicBool::new(true));
+    let rec_flag = recording.clone();
+    let writer_clone = writer.clone();
+
+    // Build input stream
+    let stream = input_device
+        .build_input_stream(
+            &config,
+            move |data: &[i16], _: &cpal::InputCallbackInfo| {
+                if !rec_flag.load(Ordering::SeqCst) {
+                    return;
+                }
+                let mut w = writer_clone.lock().unwrap();
+                for &sample in data {
+                    w.write_sample(sample).ok();
+                }
+            },
+            move |err| eprintln!("Stream error: {}", err),
+            None,
+        )
+        .map_err(|e| e.to_string())?;
+
+    stream.play().map_err(|e| e.to_string())?;
+
+    // Record for a fixed duration (e.g., 5 seconds) or until stop_recording is called
+    // Here we use a simple timeout
+    sleep(Duration::from_secs(5)).await;
+    recording.store(false, Ordering::SeqCst);
+    drop(stream);
+    writer.lock().unwrap().finalize().map_err(|e| e.to_string())?;
+
+    // 4. Execute Whisper binary
+    let exe_path = {
+        #[cfg(target_os = "windows")]
+        {
+            app.path_resolver()
+                .resolve_resource("whisper/windows/whisper.exe")
+        }
+        #[cfg(target_os = "macos")]
+        {
+            app.path_resolver()
+                .resolve_resource("whisper/macos/whisper")
+        }
+        #[cfg(target_os = "linux")]
+        {
+            app.path_resolver()
+                .resolve_resource("whisper/linux/whisper")
+        }
+    }
+    .ok_or_else(|| "Whisper binary not found".to_string())?;
+
+    let output = Command::new(exe_path)
+        .arg("--model")
+        .arg("models/ggml-small.bin")
+        .arg("--language")
+        .arg("auto")
+        .arg("--print-realtime")
+        .arg(&wav_path)
+        .output()
+        .map_err(|e| e.to_string())?;
+
+    // 5. Parse Whisper output
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let mut language = "auto".to_string();
+    let mut text = String::new();
+    for line in stdout.lines() {
+        if line.starts_with("Detected language:") {
+            language = line["Detected language:".len()..].trim().to_string();
+        }
+        if line.starts_with("Transcribed text:") {
+            text = line["Transcribed text:".len()..].trim().to_string();
+        }
+    }
+
+    // Cleanup temporary wav file
+    std::fs::remove_file(&wav_path).ok();
+
+    // 6. Unmute system audio if it was muted
+    #[cfg(target_os = "windows")]
+    if auto_mute {
+        windows_audio::unmute_system()?;
+    }
+
+    let result = serde_json::json!({ "language": language, "text": text });
+    Ok(result.to_string())
 }
+ 
+ // New command: stop_recording
+ #[tauri::command]
+ async fn stop_recording(_app: AppHandle) -> Result<(), String> {
+     // Placeholder – would stop audio capture, unmute system audio, and clean up resources.
+     Ok(())
+ }
 
 // Command to show/hide main window
 #[tauri::command]
@@ -396,7 +576,7 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_global_shortcut::Builder::new().build())
     .manage(Mutex::<HashMap<String, String>>::new(HashMap::new()))
-        .invoke_handler(tauri::generate_handler![greet, toggle_recording, toggle_window, quit_app, update_spoken_language, update_translation_language, update_audio_device, register_hotkeys])
+    .invoke_handler(tauri::generate_handler![greet, toggle_recording, toggle_window, quit_app, update_spoken_language, update_translation_language, update_audio_device, register_hotkeys, start_recording, stop_recording])
         .setup(|app| {
             // Load current settings
             let settings = AppSettings::load(&app.handle()).unwrap_or_default();

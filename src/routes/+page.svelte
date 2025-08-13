@@ -11,7 +11,6 @@
   let selectedSourceLang = 'auto';
   let selectedTargetLang = 'en';
   let isTranslating = false;
-  let recognition: any;
   let audioLevel = 0;
   let isListening = false;
   let showNotification = false;
@@ -43,40 +42,6 @@
   ];
 
   onMount(() => {
-    // Initialize speech recognition
-    if ('webkitSpeechRecognition' in window || 'SpeechRecognition' in window) {
-      const SpeechRecognition = (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
-      recognition = new SpeechRecognition();
-      recognition.continuous = true;
-      recognition.interimResults = true;
-      recognition.lang = selectedSourceLang === 'auto' ? 'en-US' : selectedSourceLang;
-
-      recognition.onresult = (event: any) => {
-        let finalTranscript = '';
-        for (let i = event.resultIndex; i < event.results.length; i++) {
-          if (event.results[i].isFinal) {
-            finalTranscript += event.results[i][0].transcript;
-          }
-        }
-        if (finalTranscript) {
-          transcribedText = finalTranscript;
-          translateText(finalTranscript);
-        }
-      };
-
-      recognition.onerror = (event: any) => {
-        console.error('Speech recognition error:', event.error);
-        stopRecording();
-      };
-
-      recognition.onend = () => {
-        isListening = false;
-        if (isRecording) {
-          recognition.start(); // Restart if still recording
-        }
-      };
-    }
-    
     // Listen for tray menu events
     const unlistenSpokenLanguage = listen('tray-spoken-language-change', (event) => {
       const language = event.payload as string;
@@ -95,15 +60,15 @@
       settings.setAudioDevice(device);
     });
 
-  // Register initial hotkeys (only pushToTalk and handsFree)
-  const currentSettings = get(settings);
-  invoke('register_hotkeys', { hotkeys: { pushToTalk: currentSettings.hotkeys.pushToTalk, handsFree: currentSettings.hotkeys.handsFree } })
-      .then(() => {
-    console.log('Hotkeys registered successfully:', { pushToTalk: currentSettings.hotkeys.pushToTalk, handsFree: currentSettings.hotkeys.handsFree });
-      })
-      .catch((error) => {
-        console.error('Failed to register hotkeys:', error);
-      });
+    // Register initial hotkeys (only pushToTalk and handsFree)
+    const currentSettings = get(settings);
+    invoke('register_hotkeys', { hotkeys: { pushToTalk: currentSettings.hotkeys.pushToTalk, handsFree: currentSettings.hotkeys.handsFree } })
+        .then(() => {
+      console.log('Hotkeys registered successfully:', { pushToTalk: currentSettings.hotkeys.pushToTalk, handsFree: currentSettings.hotkeys.handsFree });
+        })
+        .catch((error) => {
+          console.error('Failed to register hotkeys:', error);
+        });
 
     // Listen for hotkey events
     const unlistenHotkeyTriggered = listen('hotkey-triggered', (event) => {
@@ -123,34 +88,24 @@
   });
 
   async function startRecording() {
-    if (!recognition) {
-      alert('Speech recognition not supported in this browser');
-      return;
-    }
-    
+    // New implementation using Tauri backend
+    isRecording = true;
+    isListening = true;
+    transcribedText = '';
+    translatedText = '';
+    const device = get(settings).audioDevice;
+    const autoMute = get(settings).autoMute;
     try {
-      // Get microphone access for audio level monitoring
-      microphoneStream = await navigator.mediaDevices.getUserMedia({ audio: true });
-      
-      // Set up audio context for level monitoring
-  audioContext = new ((window as any).AudioContext || (window as any).webkitAudioContext)();
-  const ctx = audioContext!;
-  const source = ctx.createMediaStreamSource(microphoneStream);
-  analyzer = ctx.createAnalyser();
-      analyzer.fftSize = 256;
-      source.connect(analyzer);
-      
-      // Start audio level monitoring
-      monitorAudioLevel();
-      
-      isRecording = true;
-      isListening = true;
-      transcribedText = '';
-      translatedText = '';
-      recognition.start();
-    } catch (error) {
-      console.error('Microphone access denied:', error);
-      alert('Microphone access is required for voice recording. Please allow microphone access and try again.');
+      const result = await invoke('start_recording', { device, autoMute });
+      const { language, text } = JSON.parse(result as string);
+      transcribedText = text;
+      // Optionally translate if enabled
+      if (selectedTargetLang !== 'none' && selectedTargetLang !== selectedSourceLang) {
+        await translateText(text);
+      }
+    } catch (e) {
+      console.error('Recording error:', e);
+      showTrayNotification('Recording failed');
     }
   }
 
@@ -180,10 +135,6 @@
     isRecording = false;
     isListening = false;
     audioLevel = 0;
-    
-    if (recognition) {
-      recognition.stop();
-    }
     
     // Clean up audio resources
     if (microphoneStream) {
@@ -276,7 +227,7 @@
                 <path d="M12 2a3 3 0 0 1 3 3v6a3 3 0 0 1-6 0V5a3 3 0 0 1 3-3z"/>
                 <path d="M19 10v1a7 7 0 0 1-14 0v-1a1 1 0 0 1 2 0v1a5 5 0 0 0 10 0v-1a1 1 0 0 1 2 0z"/>
                 <path d="M12 18.5a1 1 0 0 1 1 1V22a1 1 0 0 1-2 0v-2.5a1 1 0 0 1 1-1z"/>
-                <path d="M8 22h8a1 1 0 0 1 0 2H8a1 1 0 0 1 0-2z"/>
+                <path d="M8 22h8a1 0 0 0 0 2H8a1 0 0 0 0-2z"/>
               </svg>
             {/if}
           </div>

@@ -41,6 +41,12 @@
       "icons/128x128@2x.png",
       "icons/icon.icns",
       "icons/icon.ico"
+    ],
+    "resources": [
+      "whisper/windows/whisper.exe",
+      "whisper/macos/whisper",
+      "whisper/linux/whisper",
+      "models/ggml-small.bin"
     ]
   }
 }
