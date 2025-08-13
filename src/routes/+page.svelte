@@ -14,23 +14,9 @@
   let isListening = false;
   let showNotification = false;
   let notificationMessage = '';
-  let isDarkTheme = false;
   let microphoneStream: MediaStream | null = null;
   let audioContext: AudioContext | null = null;
   let analyzer: AnalyserNode | null = null;
-  let sidebarOpen = false;
-  let currentPage = 'home';
-
-  function toggleTheme() {
-    isDarkTheme = !isDarkTheme;
-    if (isDarkTheme) {
-      document.documentElement.classList.add('dark');
-      localStorage.setItem('theme', 'dark');
-    } else {
-      document.documentElement.classList.remove('dark');
-      localStorage.setItem('theme', 'light');
-    }
-  }
 
   function showTrayNotification(message: string) {
     notificationMessage = message;
@@ -55,16 +41,9 @@
   ];
 
   onMount(() => {
-    // Initialize theme
-    const savedTheme = localStorage.getItem('theme');
-    if (savedTheme === 'dark' || (!savedTheme && window.matchMedia('(prefers-color-scheme: dark)').matches)) {
-      isDarkTheme = true;
-      document.documentElement.classList.add('dark');
-    }
-
     // Initialize speech recognition
     if ('webkitSpeechRecognition' in window || 'SpeechRecognition' in window) {
-      const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+      const SpeechRecognition = (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
       recognition = new SpeechRecognition();
       recognition.continuous = true;
       recognition.interimResults = true;
@@ -108,7 +87,7 @@
       microphoneStream = await navigator.mediaDevices.getUserMedia({ audio: true });
       
       // Set up audio context for level monitoring
-      audioContext = new (window.AudioContext || window.webkitAudioContext)();
+      audioContext = new ((window as any).AudioContext || (window as any).webkitAudioContext)();
       const source = audioContext.createMediaStreamSource(microphoneStream);
       analyzer = audioContext.createAnalyser();
       analyzer.fftSize = 256;
@@ -224,44 +203,39 @@
     a.click();
     URL.revokeObjectURL(url);
   }
-
-  function toggleSidebar() {
-    sidebarOpen = !sidebarOpen;
-  }
-
-  function navigateToPage(page: string) {
-    currentPage = page;
-    if (window.innerWidth < 768) {
-      sidebarOpen = false; // Close sidebar on mobile after navigation
-    }
-  }
 </script>
 
-<div class="h-screen bg-gray-100 dark:bg-gray-900">
-  <div class="max-w-4xl mx-auto py-8 px-4">
-    <div class="bg-white dark:bg-gray-800 rounded-lg shadow-lg p-8">
-      <div class="text-center mb-8">
-        <h1 class="text-3xl font-bold text-gray-900 dark:text-white mb-2">TalkToMe</h1>
-        <p class="text-gray-600 dark:text-gray-400">Voice to Text with Translation</p>
-      </div>
+<div class="max-w-4xl mx-auto py-8 px-4">
+  <div class="bg-white dark:bg-gray-800 rounded-lg shadow-lg p-8">
+    <div class="text-center mb-8">
+      <p class="text-gray-600 dark:text-gray-400">Voice to Text with Translation</p>
+    </div>
 
       <!-- Recording Button -->
       <div class="flex justify-center mb-8">
         <button
           on:click={isRecording ? stopRecording : startRecording}
-          class="relative w-24 h-24 rounded-full transition-all duration-200 transform hover:scale-105 focus:outline-none focus:ring-4 focus:ring-blue-300"
+          class="relative w-24 h-24 rounded-full transition-all duration-200 transform hover:scale-105 focus:outline-none focus:ring-4 focus:ring-blue-300/50 shadow-lg"
           class:bg-red-500={isRecording}
           class:bg-blue-600={!isRecording}
           class:animate-pulse={isListening}
         >
+          <div class="flex items-center justify-center w-full h-full">
+            {#if isRecording}
+              <svg class="w-12 h-12 text-white" fill="currentColor" viewBox="0 0 24 24">
+                <path d="M6 6h12v12H6z"/>
+              </svg>
+            {:else}
+              <svg class="w-12 h-12 text-white" fill="currentColor" viewBox="0 0 24 24">
+                <path d="M12 2a3 3 0 0 1 3 3v6a3 3 0 0 1-6 0V5a3 3 0 0 1 3-3z"/>
+                <path d="M19 10v1a7 7 0 0 1-14 0v-1a1 1 0 0 1 2 0v1a5 5 0 0 0 10 0v-1a1 1 0 0 1 2 0z"/>
+                <path d="M12 18.5a1 1 0 0 1 1 1V22a1 1 0 0 1-2 0v-2.5a1 1 0 0 1 1-1z"/>
+                <path d="M8 22h8a1 1 0 0 1 0 2H8a1 1 0 0 1 0-2z"/>
+              </svg>
+            {/if}
+          </div>
           {#if isRecording}
-            <svg class="w-10 h-10 text-white mx-auto" fill="currentColor" viewBox="0 0 20 20">
-              <path fill-rule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zM8 7a1 1 0 00-1 1v4a1 1 0 001 1h4a1 1 0 001-1V8a1 1 0 00-1-1H8z" clip-rule="evenodd" />
-            </svg>
-          {:else}
-            <svg class="w-10 h-10 text-white mx-auto" fill="currentColor" viewBox="0 0 20 20">
-              <path fill-rule="evenodd" d="M7 4a3 3 0 016 0v4a3 3 0 11-6 0V4zm4 10.93A7.001 7.001 0 0017 8a1 1 0 10-2 0A5 5 0 715 8a1 1 0 00-2 0 7.001 7.001 0 006 6.93V17H6a1 1 0 100 2h8a1 1 0 100-2h-3v-2.07z" clip-rule="evenodd" />
-            </svg>
+            <div class="absolute inset-0 rounded-full bg-red-500 opacity-30 animate-ping"></div>
           {/if}
         </button>
       </div>
@@ -353,33 +327,8 @@
           </div>
         </div>
       </div>
-
-      <!-- Action Buttons -->
-      <div class="flex justify-center space-x-4">
-        <button
-          on:click={clearText}
-          class="px-6 py-2 bg-gray-500 hover:bg-gray-600 text-white rounded-lg transition-colors duration-200"
-          disabled={!transcribedText.trim() && !translatedText.trim()}
-        >
-          Clear Text
-        </button>
-        <button
-          on:click={exportText}
-          class="px-6 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg transition-colors duration-200"
-          disabled={!transcribedText.trim()}
-        >
-          Export Text
-        </button>
-        <button
-          on:click={toggleTheme}
-          class="px-6 py-2 bg-gray-600 hover:bg-gray-700 text-white rounded-lg transition-colors duration-200"
-        >
-          {isDarkTheme ? 'Light' : 'Dark'} Theme
-        </button>
-      </div>
     </div>
   </div>
-</div>
 
 <!-- Notification Toast -->
 {#if showNotification}
