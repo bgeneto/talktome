@@ -1,6 +1,6 @@
 <script lang="ts">
-  import { onMount } from 'svelte';
-  import { settings } from '../../lib/stores/settingsStore';
+  import { onMount, onDestroy } from "svelte";
+  import { settings } from "../../lib/stores/settingsStore";
 
   interface AudioDevice {
     id: string;
@@ -9,104 +9,232 @@
   }
 
   let audioDevices: AudioDevice[] = [];
-  let selectedDevice = '';
-  let inputVolume = 75;
-  let outputVolume = 50;
-  let noiseSuppression = true;
-  let echoCancellation = true;
-  let autoGainControl = true;
-  let sampleRate = 44100;
-  let bufferSize = 256;
-  let voiceActivityDetection = true;
-  let silenceThreshold = 30;
+  let selectedDevice = "";
   let isRecording = false;
   let testAudioLevel = 0;
+  let saveSuccess = false;
+  let isLoading = false;
 
   // Mock audio devices for now
   const mockDevices: AudioDevice[] = [
-    { id: 'default', name: 'Default Microphone', isDefault: true },
-    { id: 'mic1', name: 'Headset Microphone (USB)', isDefault: false },
-    { id: 'mic2', name: 'Built-in Microphone', isDefault: false },
-    { id: 'mic3', name: 'External Microphone (3.5mm)', isDefault: false }
+    { id: "default", name: "Default Microphone", isDefault: true },
+    { id: "mic1", name: "Headset Microphone (USB)", isDefault: false },
+    { id: "mic2", name: "Built-in Microphone", isDefault: false },
+    { id: "mic3", name: "External Microphone (3.5mm)", isDefault: false },
   ];
 
   onMount(() => {
-    // Load audio devices and settings
-    audioDevices = mockDevices;
-    selectedDevice = audioDevices.find(d => d.isDefault)?.id || 'default';
-    
-    // Subscribe to settings changes
-    const unsubscribe = settings.subscribe(currentSettings => {
+    // Load real audio devices
+    refreshDevices();
+
+    // Subscribe to settings store for external changes
+    const unsubscribe = settings.subscribe((currentSettings) => {
       selectedDevice = currentSettings.audioDevice;
     });
-    
+
     return () => unsubscribe();
   });
 
-  function saveAudioSettings() {
-    settings.setAudioDevice(selectedDevice);
-    console.log('Saving audio settings...', {
-      selectedDevice,
-      inputVolume,
-      outputVolume,
-      noiseSuppression,
-      echoCancellation,
-      autoGainControl,
-      sampleRate,
-      bufferSize,
-      voiceActivityDetection,
-      silenceThreshold
-    });
+  onDestroy(() => {
+    // Clean up any running microphone test when component is destroyed
+    if (isRecording) {
+      stopMicrophoneTest();
+    }
+  });
+
+  async function saveAudioSettings() {
+    if (saveSuccess) return;
+
+    console.log("Saving audio settings...", { selectedDevice });
+
+    try {
+      // Optional: prevent subscription from overriding during save
+      if ((window as any).setLanguageSettingsSaving) {
+        (window as any).setLanguageSettingsSaving(true);
+      }
+
+      // Update store (synchronous)
+      settings.setAudioDevice(selectedDevice);
+
+      console.log("Audio settings saved successfully");
+      saveSuccess = true;
+    } catch (error) {
+      console.error("Failed to save audio settings:", error);
+    } finally {
+      if ((window as any).setLanguageSettingsSaving) {
+        (window as any).setLanguageSettingsSaving(false);
+      }
+    }
+
+    // Reset success flag after a short delay
+    setTimeout(() => {
+      saveSuccess = false;
+    }, 3000);
   }
 
-  function testMicrophone() {
-    isRecording = !isRecording;
+  let currentStream: MediaStream | null = null;
+  let currentAudioContext: AudioContext | null = null;
+  let animationId: number | null = null;
+
+  async function testMicrophone() {
     if (isRecording) {
-      console.log('Starting microphone test...');
-      // Mock audio level animation
-      const interval = setInterval(() => {
-        testAudioLevel = Math.random() * 100;
-      }, 100);
-      
-      setTimeout(() => {
-        clearInterval(interval);
-        isRecording = false;
-        testAudioLevel = 0;
-      }, 5000);
-    } else {
-      testAudioLevel = 0;
+      stopMicrophoneTest();
+      return;
+    }
+
+    try {
+      isRecording = true;
+
+      // Request microphone access with specific device
+      const constraints: MediaStreamConstraints = {
+        audio:
+          selectedDevice && selectedDevice !== "default"
+            ? { deviceId: { exact: selectedDevice } }
+            : true,
+      };
+
+      console.log(
+        "Requesting microphone access with constraints:",
+        constraints
+      );
+      currentStream = await navigator.mediaDevices.getUserMedia(constraints);
+
+      // Create audio context
+      currentAudioContext = new (window.AudioContext ||
+        (window as any).webkitAudioContext)();
+
+      // Resume audio context if suspended
+      if (currentAudioContext.state === "suspended") {
+        await currentAudioContext.resume();
+      }
+
+      // Create audio nodes
+      const source = currentAudioContext.createMediaStreamSource(currentStream);
+      const analyser = currentAudioContext.createAnalyser();
+
+      // Configure analyser
+      analyser.fftSize = 1024;
+      analyser.smoothingTimeConstant = 0.8;
+
+      // Connect source to analyser
+      source.connect(analyser);
+
+      const bufferLength = analyser.frequencyBinCount;
+      const dataArray = new Uint8Array(bufferLength);
+
+      console.log("Microphone test started successfully");
+
+      const updateLevel = () => {
+        if (!isRecording || !analyser) return;
+
+        // Get frequency data for better audio level detection
+        analyser.getByteFrequencyData(dataArray);
+
+        // Calculate average amplitude
+        let sum = 0;
+        for (let i = 0; i < bufferLength; i++) {
+          sum += dataArray[i];
+        }
+
+        const average = sum / bufferLength;
+
+        // Convert to percentage (0-100)
+        const percentage = (average / 255) * 100;
+
+        // Apply some smoothing and scaling
+        testAudioLevel = Math.min(100, Math.max(0, percentage * 1.5));
+
+        if (isRecording) {
+          animationId = requestAnimationFrame(updateLevel);
+        }
+      };
+
+      updateLevel();
+    } catch (error) {
+      console.error("Error during microphone test:", error);
+
+      let errorMessage = "Failed to access microphone";
+      if (error instanceof Error) {
+        if (error.name === "NotAllowedError") {
+          errorMessage =
+            "Microphone access denied. Please allow microphone permissions.";
+        } else if (error.name === "NotFoundError") {
+          errorMessage =
+            "Selected microphone not found. Please try another device.";
+        } else if (error.name === "NotReadableError") {
+          errorMessage = "Microphone is already in use by another application.";
+        }
+      }
+
+      alert(errorMessage);
+      stopMicrophoneTest();
     }
   }
 
-  function refreshDevices() {
-    console.log('Refreshing audio devices...');
-    // TODO: Implement device refresh
+  function stopMicrophoneTest() {
+    isRecording = false;
+    testAudioLevel = 0;
+
+    // Cancel animation frame
+    if (animationId !== null) {
+      cancelAnimationFrame(animationId);
+      animationId = null;
+    }
+
+    // Stop all tracks
+    if (currentStream) {
+      currentStream.getTracks().forEach((track) => {
+        track.stop();
+        console.log("Stopped audio track:", track.label);
+      });
+      currentStream = null;
+    }
+
+    // Close audio context
+    if (currentAudioContext && currentAudioContext.state !== "closed") {
+      currentAudioContext.close();
+      currentAudioContext = null;
+    }
+
+    console.log("Microphone test stopped");
   }
 
-  function resetToDefaults() {
-    selectedDevice = 'default';
-    inputVolume = 75;
-    outputVolume = 50;
-    noiseSuppression = true;
-    echoCancellation = true;
-    autoGainControl = true;
-    sampleRate = 44100;
-    bufferSize = 256;
-    voiceActivityDetection = true;
-    silenceThreshold = 30;
-    saveAudioSettings();
+  async function refreshDevices() {
+    try {
+      const devices = await navigator.mediaDevices.enumerateDevices();
+      const audioInputs = devices.filter((d) => d.kind === "audioinput");
+      audioDevices = audioInputs.map((d) => ({
+        id: d.deviceId,
+        name: d.label || `Microphone (${d.deviceId})`,
+        isDefault: d.deviceId === "default",
+      }));
+      // Select default device if none selected
+      if (!selectedDevice && audioDevices.length > 0) {
+        selectedDevice =
+          audioDevices.find((d) => d.isDefault)?.id || audioDevices[0].id;
+      }
+    } catch (e) {
+      console.error("Failed to enumerate audio devices:", e);
+    }
   }
 </script>
 
 <div class="space-y-6">
-  <!-- Device Selection -->
+  <!-- Device Selection & Test -->
   <section>
-    <h3 class="text-lg font-medium text-gray-900 dark:text-white mb-4">Audio Device Selection</h3>
-    <div class="bg-white dark:bg-gray-800 rounded-lg border border-gray-200 dark:border-gray-700 p-6">
+    <h3 class="text-lg font-medium text-gray-900 dark:text-white mb-4">
+      Audio Device Selection
+    </h3>
+    <div
+      class="bg-white dark:bg-gray-800 rounded-lg border border-gray-200 dark:border-gray-700 p-6"
+    >
       <div class="space-y-4">
         <div>
           <div class="flex justify-between items-center mb-2">
-            <label class="block text-sm font-medium text-gray-700 dark:text-gray-300">
+            <label
+              for="microphone-device"
+              class="block text-sm font-medium text-gray-700 dark:text-gray-300"
+            >
               Microphone Device
             </label>
             <button
@@ -116,242 +244,99 @@
               Refresh Devices
             </button>
           </div>
-          <select 
+          <select
+            id="microphone-device"
             bind:value={selectedDevice}
             class="w-full px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-md shadow-sm focus:outline-none focus:ring-blue-500 focus:border-blue-500 dark:bg-gray-700 dark:text-white"
           >
             {#each audioDevices as device}
               <option value={device.id}>
-                {device.name} {device.isDefault ? '(Default)' : ''}
+                {device.name}
+                {device.isDefault ? "(Default)" : ""}
               </option>
             {/each}
           </select>
         </div>
 
-        <!-- Microphone Test -->
         <div>
           <div class="flex justify-between items-center mb-2">
-            <label class="block text-sm font-medium text-gray-700 dark:text-gray-300">
+            <span
+              class="block text-sm font-medium text-gray-700 dark:text-gray-300"
+            >
               Microphone Test
-            </label>
+            </span>
             <button
               on:click={testMicrophone}
-              class="px-4 py-2 {isRecording ? 'bg-red-600 hover:bg-red-700' : 'bg-blue-600 hover:bg-blue-700'} text-white rounded-md transition-colors"
+              class="px-4 py-2 {isRecording
+                ? 'bg-red-600 hover:bg-red-700'
+                : 'bg-blue-600 hover:bg-blue-700'} text-white rounded-md transition-colors"
             >
-              {isRecording ? 'Stop Test' : 'Test Microphone'}
+              {isRecording ? "Stop Test" : "Test Microphone"}
             </button>
           </div>
-          
-          <!-- Audio Level Indicator -->
-          <div class="w-full bg-gray-200 dark:bg-gray-700 rounded-full h-4 overflow-hidden">
+
+          <div
+            class="w-full bg-gray-200 dark:bg-gray-700 rounded-full h-4 overflow-hidden"
+          >
             <div
-              class="h-full bg-gradient-to-r from-green-400 to-red-500 transition-all duration-100"
+              class="h-full bg-gradient-to-r from-green-400 via-yellow-400 to-red-500 transition-all duration-75 ease-out"
               style="width: {testAudioLevel}%"
             ></div>
           </div>
           <p class="text-xs text-gray-500 dark:text-gray-400 mt-1">
-            Speak into your microphone to test the input level
+            Speak into your microphone to see input level - Current: {Math.round(
+              testAudioLevel
+            )}%
           </p>
         </div>
       </div>
     </div>
   </section>
 
-  <!-- Volume Controls -->
-  <section>
-    <h3 class="text-lg font-medium text-gray-900 dark:text-white mb-4">Volume Controls</h3>
-    <div class="bg-white dark:bg-gray-800 rounded-lg border border-gray-200 dark:border-gray-700 p-6">
-      <div class="space-y-6">
-        <div>
-          <label class="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">
-            Input Volume: {inputVolume}%
-          </label>
-          <input
-            type="range"
-            min="0"
-            max="100"
-            bind:value={inputVolume}
-            class="w-full h-2 bg-gray-200 dark:bg-gray-700 rounded-lg appearance-none cursor-pointer slider"
-          >
-        </div>
-
-        <div>
-          <label class="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">
-            Output Volume: {outputVolume}%
-          </label>
-          <input
-            type="range"
-            min="0"
-            max="100"
-            bind:value={outputVolume}
-            class="w-full h-2 bg-gray-200 dark:bg-gray-700 rounded-lg appearance-none cursor-pointer slider"
-          >
-          <p class="text-xs text-gray-500 dark:text-gray-400 mt-1">
-            Volume for audio feedback and system sounds
-          </p>
-        </div>
-      </div>
-    </div>
-  </section>
-
-  <!-- Audio Processing -->
-  <section>
-    <h3 class="text-lg font-medium text-gray-900 dark:text-white mb-4">Audio Processing</h3>
-    <div class="bg-white dark:bg-gray-800 rounded-lg border border-gray-200 dark:border-gray-700 p-6">
-      <div class="space-y-4">
-        <div class="flex items-center">
-          <input
-            type="checkbox"
-            id="noiseSuppression"
-            bind:checked={noiseSuppression}
-            class="h-4 w-4 text-blue-600 focus:ring-blue-500 border-gray-300 rounded"
-          >
-          <label for="noiseSuppression" class="ml-2 block text-sm text-gray-700 dark:text-gray-300">
-            Noise Suppression
-          </label>
-        </div>
-        <p class="ml-6 text-xs text-gray-500 dark:text-gray-400">
-          Reduce background noise for clearer speech recognition
-        </p>
-
-        <div class="flex items-center">
-          <input
-            type="checkbox"
-            id="echoCancellation"
-            bind:checked={echoCancellation}
-            class="h-4 w-4 text-blue-600 focus:ring-blue-500 border-gray-300 rounded"
-          >
-          <label for="echoCancellation" class="ml-2 block text-sm text-gray-700 dark:text-gray-300">
-            Echo Cancellation
-          </label>
-        </div>
-        <p class="ml-6 text-xs text-gray-500 dark:text-gray-400">
-          Prevent audio feedback from speakers
-        </p>
-
-        <div class="flex items-center">
-          <input
-            type="checkbox"
-            id="autoGainControl"
-            bind:checked={autoGainControl}
-            class="h-4 w-4 text-blue-600 focus:ring-blue-500 border-gray-300 rounded"
-          >
-          <label for="autoGainControl" class="ml-2 block text-sm text-gray-700 dark:text-gray-300">
-            Automatic Gain Control
-          </label>
-        </div>
-        <p class="ml-6 text-xs text-gray-500 dark:text-gray-400">
-          Automatically adjust microphone sensitivity
-        </p>
-
-        <div class="flex items-center">
-          <input
-            type="checkbox"
-            id="voiceActivityDetection"
-            bind:checked={voiceActivityDetection}
-            class="h-4 w-4 text-blue-600 focus:ring-blue-500 border-gray-300 rounded"
-          >
-          <label for="voiceActivityDetection" class="ml-2 block text-sm text-gray-700 dark:text-gray-300">
-            Voice Activity Detection
-          </label>
-        </div>
-        <p class="ml-6 text-xs text-gray-500 dark:text-gray-400">
-          Only process audio when speech is detected
-        </p>
-      </div>
-    </div>
-  </section>
-
-  <!-- Advanced Settings -->
-  <section>
-    <h3 class="text-lg font-medium text-gray-900 dark:text-white mb-4">Advanced Settings</h3>
-    <div class="bg-white dark:bg-gray-800 rounded-lg border border-gray-200 dark:border-gray-700 p-6">
-      <div class="space-y-4">
-        <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
-          <div>
-            <label class="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">
-              Sample Rate
-            </label>
-            <select 
-              bind:value={sampleRate}
-              class="w-full px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-md shadow-sm focus:outline-none focus:ring-blue-500 focus:border-blue-500 dark:bg-gray-700 dark:text-white"
-            >
-              <option value={22050}>22.05 kHz</option>
-              <option value={44100}>44.1 kHz (CD Quality)</option>
-              <option value={48000}>48 kHz (Professional)</option>
-              <option value={96000}>96 kHz (High Quality)</option>
-            </select>
-          </div>
-
-          <div>
-            <label class="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">
-              Buffer Size
-            </label>
-            <select 
-              bind:value={bufferSize}
-              class="w-full px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-md shadow-sm focus:outline-none focus:ring-blue-500 focus:border-blue-500 dark:bg-gray-700 dark:text-white"
-            >
-              <option value={64}>64 samples (Low Latency)</option>
-              <option value={128}>128 samples</option>
-              <option value={256}>256 samples (Balanced)</option>
-              <option value={512}>512 samples</option>
-              <option value={1024}>1024 samples (High Quality)</option>
-            </select>
-          </div>
-        </div>
-
-        <div>
-          <label class="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">
-            Silence Threshold: {silenceThreshold} dB
-          </label>
-          <input
-            type="range"
-            min="0"
-            max="100"
-            bind:value={silenceThreshold}
-            class="w-full h-2 bg-gray-200 dark:bg-gray-700 rounded-lg appearance-none cursor-pointer slider"
-          >
-          <p class="text-xs text-gray-500 dark:text-gray-400 mt-1">
-            Audio level below which input is considered silence
-          </p>
-        </div>
-      </div>
-    </div>
-  </section>
-
-  <!-- Action Buttons -->
-  <div class="flex justify-between">
-    <button
-      on:click={resetToDefaults}
-      class="px-6 py-2 border border-gray-300 dark:border-gray-600 text-gray-700 dark:text-gray-300 rounded-lg hover:bg-gray-50 dark:hover:bg-gray-700 transition-colors"
-    >
-      Reset to Defaults
-    </button>
+  <!-- Save Button -->
+  <div class="flex justify-end">
     <button
       on:click={saveAudioSettings}
-      class="px-6 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors"
+      class="px-6 py-2 text-white rounded-lg transition-colors flex items-center justify-center"
+      class:bg-blue-600={!saveSuccess && !isLoading}
+      class:hover:bg-blue-700={!saveSuccess && !isLoading}
+      class:bg-green-600={saveSuccess}
+      class:bg-gray-400={isLoading}
+      disabled={saveSuccess || isLoading}
     >
-      Save Audio Settings
+      {#if isLoading}
+        <svg
+          class="w-4 h-4 mr-1 animate-spin"
+          fill="none"
+          stroke="currentColor"
+          viewBox="0 0 24 24"
+        >
+          <path
+            stroke-linecap="round"
+            stroke-linejoin="round"
+            stroke-width="2"
+            d="M12 6v6m0 0v6m0-6h6m-6 0H6"
+          ></path>
+        </svg>
+        Loading...
+      {:else if saveSuccess}
+        <svg
+          class="w-4 h-4 mr-1"
+          fill="none"
+          stroke="currentColor"
+          viewBox="0 0 24 24"
+        >
+          <path
+            stroke-linecap="round"
+            stroke-linejoin="round"
+            stroke-width="2"
+            d="M5 13l4 4L19 7"
+          />
+        </svg>
+        Settings saved
+      {:else}
+        Save Audio Settings
+      {/if}
     </button>
   </div>
 </div>
-
-<style>
-  .slider::-webkit-slider-thumb {
-    appearance: none;
-    height: 20px;
-    width: 20px;
-    border-radius: 50%;
-    background: #3b82f6;
-    cursor: pointer;
-  }
-
-  .slider::-moz-range-thumb {
-    width: 20px;
-    height: 20px;
-    border-radius: 50%;
-    background: #3b82f6;
-    cursor: pointer;
-    border: none;
-  }
-</style>

@@ -15,6 +15,7 @@ interface Settings {
     emergencyStop: string;
   };
   autoMute: boolean;
+  quickAccessLanguages: string[];
 }
 
 const defaultSettings: Settings = {
@@ -30,12 +31,26 @@ const defaultSettings: Settings = {
     handsFree: 'Ctrl+Shift+H',
     emergencyStop: 'Escape'
   },
-  autoMute: true
+  autoMute: true,
+  quickAccessLanguages: []
 };
 
 function createSettingsStore() {
-  const storedSettings = localStorage.getItem('talktome-settings');
-  const initialSettings: Settings = storedSettings ? JSON.parse(storedSettings) : defaultSettings;
+  let initialSettings: Settings;
+  
+  try {
+    const storedSettings = localStorage.getItem('talktome-settings');
+    if (storedSettings) {
+      initialSettings = { ...defaultSettings, ...JSON.parse(storedSettings) };
+      console.log('Loaded settings from localStorage:', initialSettings);
+    } else {
+      initialSettings = defaultSettings;
+      console.log('Using default settings, no localStorage found');
+    }
+  } catch (error) {
+    console.error('Error loading settings from localStorage:', error);
+    initialSettings = defaultSettings;
+  }
   
   const { subscribe, set, update } = writable(initialSettings);
 
@@ -46,6 +61,7 @@ function createSettingsStore() {
     setSpokenLanguage: (language: string) => {
       update(settings => {
         const newSettings = { ...settings, spokenLanguage: language };
+        console.log('Updating spoken language to:', language);
         localStorage.setItem('talktome-settings', JSON.stringify(newSettings));
         // Update tray menu
         invoke('update_spoken_language', { language }).catch(err => {
@@ -57,6 +73,7 @@ function createSettingsStore() {
     setTranslationLanguage: (language: string) => {
       update(settings => {
         const newSettings = { ...settings, translationLanguage: language };
+        console.log('Updating translation language to:', language);
         localStorage.setItem('talktome-settings', JSON.stringify(newSettings));
         // Update tray menu
         invoke('update_translation_language', { language }).catch(err => {
@@ -73,6 +90,14 @@ function createSettingsStore() {
         invoke('update_audio_device', { device }).catch(err => {
           console.error('Failed to update audio device in tray:', err);
         });
+        return newSettings;
+      });
+    },
+    setQuickAccessLanguages: (languages: string[]) => {
+      update(settings => {
+        const newSettings = { ...settings, quickAccessLanguages: languages };
+        console.log('Updating quick access languages to:', languages);
+        localStorage.setItem('talktome-settings', JSON.stringify(newSettings));
         return newSettings;
       });
     }
