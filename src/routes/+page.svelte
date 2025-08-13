@@ -3,6 +3,7 @@
   import { invoke } from "@tauri-apps/api/core";
   import { listen } from "@tauri-apps/api/event";
   import { settings } from '../lib/stores/settingsStore';
+  import { get } from 'svelte/store';
   
   let isRecording = false;
   let transcribedText = '';
@@ -93,6 +94,32 @@
       const device = event.payload as string;
       settings.setAudioDevice(device);
     });
+
+  // Register initial hotkeys (only pushToTalk and handsFree)
+  const currentSettings = get(settings);
+  invoke('register_hotkeys', { hotkeys: { pushToTalk: currentSettings.hotkeys.pushToTalk, handsFree: currentSettings.hotkeys.handsFree } })
+      .then(() => {
+    console.log('Hotkeys registered successfully:', { pushToTalk: currentSettings.hotkeys.pushToTalk, handsFree: currentSettings.hotkeys.handsFree });
+      })
+      .catch((error) => {
+        console.error('Failed to register hotkeys:', error);
+      });
+
+    // Listen for hotkey events
+    const unlistenHotkeyTriggered = listen('hotkey-triggered', (event) => {
+      const payload = event.payload as { action?: string; state?: string };
+      const action = payload?.action;
+      const state = payload?.state;
+      console.log('Hotkey triggered action:', action);
+
+      if ((action === 'pushToTalk' || action === 'handsFree') && (state === undefined || state === 'pressed')) {
+        if (!isRecording) {
+          startRecording();
+        } else {
+          stopRecording();
+        }
+      }
+    });
   });
 
   async function startRecording() {
@@ -106,9 +133,10 @@
       microphoneStream = await navigator.mediaDevices.getUserMedia({ audio: true });
       
       // Set up audio context for level monitoring
-      audioContext = new ((window as any).AudioContext || (window as any).webkitAudioContext)();
-      const source = audioContext.createMediaStreamSource(microphoneStream);
-      analyzer = audioContext.createAnalyser();
+  audioContext = new ((window as any).AudioContext || (window as any).webkitAudioContext)();
+  const ctx = audioContext!;
+  const source = ctx.createMediaStreamSource(microphoneStream);
+  analyzer = ctx.createAnalyser();
       analyzer.fftSize = 256;
       source.connect(analyzer);
       

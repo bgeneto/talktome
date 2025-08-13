@@ -1,15 +1,169 @@
 use tauri::{
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
     menu::{MenuBuilder, MenuItemBuilder, SubmenuBuilder},
-    Manager, Emitter, AppHandle,
+    Manager, Emitter, AppHandle, State,
 };
+use tauri_plugin_global_shortcut::{Code, Modifiers, Shortcut, ShortcutState, GlobalShortcutExt};
+use std::collections::HashMap;
+use std::sync::Mutex;
 mod settings;
 use settings::AppSettings;
+
+// Global state to track registered hotkeys
+type HotkeyRegistry = Mutex<HashMap<String, String>>;
 
 // Learn more about Tauri commands at https://tauri.app/develop/calling-rust/
 #[tauri::command]
 fn greet(name: &str) -> String {
     format!("Hello, {}! You've been greeted from Rust!", name)
+}
+
+// Parse hotkey string to Shortcut struct
+fn parse_hotkey(hotkey: &str) -> Result<Shortcut, String> {
+    let parts: Vec<&str> = hotkey.split('+').map(|s| s.trim()).collect();
+    if parts.is_empty() {
+        return Err("Empty hotkey".to_string());
+    }
+    
+    let mut modifiers = Modifiers::empty();
+    let mut key_code = None;
+    
+    for part in &parts {
+        match part.to_lowercase().as_str() {
+            "ctrl" | "control" => modifiers |= Modifiers::CONTROL,
+            "alt" => modifiers |= Modifiers::ALT,
+            "shift" => modifiers |= Modifiers::SHIFT,
+            "win" | "super" | "cmd" => modifiers |= Modifiers::SUPER,
+            key => {
+                // Try to parse the key
+                let code = match key.to_lowercase().as_str() {
+                    "space" => Code::Space,
+                    "escape" | "esc" => Code::Escape,
+                    "enter" | "return" => Code::Enter,
+                    "backspace" => Code::Backspace,
+                    "tab" => Code::Tab,
+                    "f1" => Code::F1,
+                    "f2" => Code::F2,
+                    "f3" => Code::F3,
+                    "f4" => Code::F4,
+                    "f5" => Code::F5,
+                    "f6" => Code::F6,
+                    "f7" => Code::F7,
+                    "f8" => Code::F8,
+                    "f9" => Code::F9,
+                    "f10" => Code::F10,
+                    "f11" => Code::F11,
+                    "f12" => Code::F12,
+                    // Single character keys
+                    "a" => Code::KeyA,
+                    "b" => Code::KeyB,
+                    "c" => Code::KeyC,
+                    "d" => Code::KeyD,
+                    "e" => Code::KeyE,
+                    "f" => Code::KeyF,
+                    "g" => Code::KeyG,
+                    "h" => Code::KeyH,
+                    "i" => Code::KeyI,
+                    "j" => Code::KeyJ,
+                    "k" => Code::KeyK,
+                    "l" => Code::KeyL,
+                    "m" => Code::KeyM,
+                    "n" => Code::KeyN,
+                    "o" => Code::KeyO,
+                    "p" => Code::KeyP,
+                    "q" => Code::KeyQ,
+                    "r" => Code::KeyR,
+                    "s" => Code::KeyS,
+                    "t" => Code::KeyT,
+                    "u" => Code::KeyU,
+                    "v" => Code::KeyV,
+                    "w" => Code::KeyW,
+                    "x" => Code::KeyX,
+                    "y" => Code::KeyY,
+                    "z" => Code::KeyZ,
+                    "0" => Code::Digit0,
+                    "1" => Code::Digit1,
+                    "2" => Code::Digit2,
+                    "3" => Code::Digit3,
+                    "4" => Code::Digit4,
+                    "5" => Code::Digit5,
+                    "6" => Code::Digit6,
+                    "7" => Code::Digit7,
+                    "8" => Code::Digit8,
+                    "9" => Code::Digit9,
+                    _ => return Err(format!("Unsupported key: {}", key)),
+                };
+                key_code = Some(code);
+                break;
+            }
+        }
+    }
+    
+    let code = key_code.ok_or_else(|| "No key specified in hotkey".to_string())?;
+    Ok(Shortcut::new(Some(modifiers), code))
+}
+
+// Command to register hotkeys
+#[tauri::command]
+async fn register_hotkeys(
+    app: AppHandle,
+    hotkeys: std::collections::HashMap<String, String>,
+    registry: State<'_, HotkeyRegistry>,
+) -> Result<(), String> {
+    let global_shortcut = app.global_shortcut();
+    
+    // Unregister existing hotkeys
+    {
+        let mut reg = registry.lock().unwrap();
+        for (_, hotkey_str) in reg.iter() {
+            if let Ok(shortcut) = parse_hotkey(hotkey_str) {
+                let _ = global_shortcut.unregister(shortcut);
+            }
+        }
+        reg.clear();
+    }
+    
+    // Register new hotkeys
+    for (action, hotkey_str) in &hotkeys {
+        if hotkey_str.is_empty() {
+            continue;
+        }
+        
+        let shortcut = parse_hotkey(hotkey_str).map_err(|e| {
+            format!("Failed to parse hotkey '{}' for action '{}': {}", hotkey_str, action, e)
+        })?;
+        // Register handler to emit an event when the shortcut is triggered
+        let action_clone = action.clone();
+        let app_for_emit = app.clone();
+        global_shortcut
+            .on_shortcut(shortcut, move |_app, _sc, ev| {
+                let state = match ev.state {
+                    ShortcutState::Pressed => "pressed",
+                    ShortcutState::Released => "released",
+                };
+                let _ = app_for_emit.emit(
+                    "hotkey-triggered",
+                    serde_json::json!({
+                        "action": action_clone,
+                        "state": state,
+                    }),
+                );
+            })
+            .map_err(|e| {
+                format!(
+                    "Failed to attach handler for hotkey '{}' (action '{}'): {}",
+                    hotkey_str, action, e
+                )
+            })?;
+    }
+    
+    // Update registry
+    {
+        let mut reg = registry.lock().unwrap();
+        *reg = hotkeys;
+    }
+    
+    Ok(())
 }
 
 // Command to handle recording state
@@ -240,7 +394,9 @@ fn update_tray_menu(app: &AppHandle, settings: &AppSettings) -> Result<(), Box<d
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
-        .invoke_handler(tauri::generate_handler![greet, toggle_recording, toggle_window, quit_app, update_spoken_language, update_translation_language, update_audio_device])
+        .plugin(tauri_plugin_global_shortcut::Builder::new().build())
+    .manage(Mutex::<HashMap<String, String>>::new(HashMap::new()))
+        .invoke_handler(tauri::generate_handler![greet, toggle_recording, toggle_window, quit_app, update_spoken_language, update_translation_language, update_audio_device, register_hotkeys])
         .setup(|app| {
             // Load current settings
             let settings = AppSettings::load(&app.handle()).unwrap_or_default();

@@ -6,33 +6,29 @@ interface Settings {
   translationLanguage: string;
   audioDevice: string;
   theme: string;
-  autoSave: boolean;
   apiEndpoint: string;
   apiKey: string;
   hotkeys: {
     pushToTalk: string;
     handsFree: string;
-    emergencyStop: string;
   };
   autoMute: boolean;
   quickAccessLanguages: string[];
 }
 
 const defaultSettings: Settings = {
-  spokenLanguage: 'auto',
-  translationLanguage: 'none',
-  audioDevice: 'default',
-  theme: 'auto',
-  autoSave: true,
-  apiEndpoint: 'https://api.openai.com/v1',
-  apiKey: '',
+  spokenLanguage: "auto",
+  translationLanguage: "none",
+  audioDevice: "default",
+  theme: "auto",
+  apiEndpoint: "https://api.openai.com/v1",
+  apiKey: "",
   hotkeys: {
-    pushToTalk: 'Ctrl+Shift+Space',
-    handsFree: 'Ctrl+Shift+H',
-    emergencyStop: 'Escape'
+    pushToTalk: "Ctrl+Win",
+    handsFree: "Ctrl+Win+Space",
   },
   autoMute: true,
-  quickAccessLanguages: []
+  quickAccessLanguages: [],
 };
 
 function createSettingsStore() {
@@ -41,8 +37,20 @@ function createSettingsStore() {
   try {
     const storedSettings = localStorage.getItem('talktome-settings');
     if (storedSettings) {
-      initialSettings = { ...defaultSettings, ...JSON.parse(storedSettings) };
-      console.log('Loaded settings from localStorage:', initialSettings);
+      const parsed = JSON.parse(storedSettings);
+      // Deep merge and sanitize legacy keys (remove emergencyStop)
+      const mergedHotkeys = {
+        pushToTalk: parsed?.hotkeys?.pushToTalk ?? defaultSettings.hotkeys.pushToTalk,
+        handsFree: parsed?.hotkeys?.handsFree ?? defaultSettings.hotkeys.handsFree,
+      };
+      initialSettings = {
+        ...defaultSettings,
+        ...parsed,
+        hotkeys: mergedHotkeys,
+      } as Settings;
+      // Persist migration if we dropped/changed keys
+      localStorage.setItem('talktome-settings', JSON.stringify(initialSettings));
+      console.log('Loaded settings from localStorage (migrated if needed):', initialSettings);
     } else {
       initialSettings = defaultSettings;
       console.log('Using default settings, no localStorage found');
@@ -98,6 +106,17 @@ function createSettingsStore() {
         const newSettings = { ...settings, quickAccessLanguages: languages };
         console.log('Updating quick access languages to:', languages);
         localStorage.setItem('talktome-settings', JSON.stringify(newSettings));
+        return newSettings;
+      });
+    },
+  updateHotkeys: async (hotkeys: { pushToTalk: string; handsFree: string }) => {
+      update(settings => {
+        const newSettings = { ...settings, hotkeys };
+        localStorage.setItem('talktome-settings', JSON.stringify(newSettings));
+        // Register hotkeys with backend
+        invoke('register_hotkeys', { hotkeys }).catch(err => {
+          console.error('Failed to register hotkeys:', err);
+        });
         return newSettings;
       });
     }

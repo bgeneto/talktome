@@ -55,7 +55,7 @@ Tauri Version: 2.0.0
         <img src="/tauri.svg" alt="TalkToMe" class="w-16 h-16" />
       </div>
       <h2 class="text-2xl font-bold text-gray-900 dark:text-white mb-2">TalkToMe</h2>
-      <p class="text-lg text-gray-600 dark:text-gray-400 mb-4">Voice-to-Text Desktop Application</p>
+      <p class="text-lg text-gray-600 dark:text-gray-400 mb-4">Voice-to-Text with Translation App</p>
       <div class="text-sm text-gray-500 dark:text-gray-400 space-y-1">
         <p>Version {appVersion}</p>
         <p>Built on {buildDate}</p>

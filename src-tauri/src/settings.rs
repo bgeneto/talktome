@@ -20,7 +20,6 @@ pub struct AppSettings {
 pub struct Hotkeys {
     pub push_to_talk: String,
     pub hands_free: String,
-    pub emergency_stop: String,
 }
 
 impl Default for AppSettings {
@@ -34,9 +33,8 @@ impl Default for AppSettings {
             api_endpoint: "https://api.openai.com/v1".to_string(),
             api_key: "".to_string(),
             hotkeys: Hotkeys {
-                push_to_talk: "Ctrl+Shift+Space".to_string(),
-                hands_free: "Ctrl+Shift+H".to_string(),
-                emergency_stop: "Escape".to_string(),
+                push_to_talk: "Ctrl+Win".to_string(),
+                hands_free: "Ctrl+Win+Space".to_string(),
             },
             auto_mute: true,
         }
