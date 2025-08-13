@@ -299,64 +299,6 @@ TalkToMe (Tray Icon)
 | **Security Tests**      | API key storage, network isolation     | Manual security review                    |
 | **Accessibility Tests** | Screen reader compatibility            | Manual testing with assistive tools       |
 
-#### **9.3 CI/CD Pipeline**
-
-```yaml
-# .github/workflows/ci.yml
-name: CI/CD Pipeline
-
-on:
-  push:
-    branches: [main, develop]
-  pull_request:
-    branches: [main]
-
-jobs:
-  test:
-    strategy:
-      matrix:
-        os: [ubuntu-latest, windows-latest]
-    runs-on: ${{ matrix.os }}
-    steps:
-      - uses: actions/checkout@v3
-      - name: Setup Rust
-        uses: actions-rs/toolchain@v1
-        with:
-          toolchain: stable
-      - name: Setup Node.js
-        uses: actions/setup-node@v3
-        with:
-          node-version: 18
-      - name: Install dependencies
-        run: |
-          npm install
-          cargo build
-      - name: Run tests
-        run: |
-          cargo test
-          npm test
-      - name: Build application
-        run: npm run tauri build
-      
-  release:
-    if: startsWith(github.ref, 'refs/tags/v')
-    needs: test
-    strategy:
-      matrix:
-        os: [ubuntu-latest, windows-latest]
-    runs-on: ${{ matrix.os }}
-    steps:
-      - uses: actions/checkout@v3
-      - name: Build and Release
-        run: npm run tauri build
-      - name: Upload Release Assets
-        uses: softprops/action-gh-release@v1
-        with:
-          files: src-tauri/target/release/bundle/**/*
-```
-
-------
-
 ### **10. Security Considerations**
 
 | Security Aspect           | Implementation                                               | Risk Level |

@@ -1,84 +1,86 @@
 <script lang="ts">
-  import { onMount } from 'svelte';
-  import { invoke } from '@tauri-apps/api/core';
-  import { listen } from '@tauri-apps/api/event';
-  import { goto } from '$app/navigation';
-  import { page } from '$app/stores';
+  import { onMount } from "svelte";
+  import { invoke } from "@tauri-apps/api/core";
+  import { listen } from "@tauri-apps/api/event";
+  import { goto } from "$app/navigation";
+  import { page } from "$app/stores";
 
   let isDarkMode = false;
   let sidebarCollapsed = false;
-  let currentPage = 'Home';
+  let currentPage = "Home";
 
   // Navigation items matching the tray structure and SDD requirements
   const navigationItems = [
     {
-      id: 'home',
-      label: 'Home',
-      icon: 'home',
-      route: '/',
+      id: "home",
+      label: "Home",
+      icon: "home",
+      route: "/",
     },
     {
-      id: 'preferences',
-      label: 'Preferences',
-      icon: 'settings',
-      route: '/preferences',
+      id: "preferences",
+      label: "Preferences",
+      icon: "settings",
+      route: "/preferences",
     },
     {
-      id: 'language',
-      label: 'Language Settings',
-      icon: 'language',
-      route: '/language-settings',
+      id: "language",
+      label: "Language Settings",
+      icon: "language",
+      route: "/language-settings",
     },
     {
-      id: 'audio',
-      label: 'Audio Settings',
-      icon: 'microphone',
-      route: '/audio-settings',
+      id: "audio",
+      label: "Audio Settings",
+      icon: "microphone",
+      route: "/audio-settings",
     },
     {
-      id: 'about',
-      label: 'About',
-      icon: 'info',
-      route: '/about',
-    }
+      id: "about",
+      label: "About",
+      icon: "info",
+      route: "/about",
+    },
   ];
 
   onMount(async () => {
     // Initialize theme
-    isDarkMode = localStorage.getItem('theme') === 'dark';
+    isDarkMode = localStorage.getItem("theme") === "dark";
     updateTheme();
 
     // Listen for tray events to show specific pages
-    await listen('show-preferences', () => {
-      goto('/preferences');
+    await listen("show-preferences", () => {
+      goto("/preferences");
     });
 
-    await listen('show-language-settings', () => {
-      goto('/language-settings');
+    await listen("show-language-settings", () => {
+      goto("/language-settings");
     });
 
-    await listen('show-audio-settings', () => {
-      goto('/audio-settings');
+    await listen("show-audio-settings", () => {
+      goto("/audio-settings");
     });
 
-    await listen('show-about', () => {
-      goto('/about');
+    await listen("show-about", () => {
+      goto("/about");
     });
 
     // Update current page based on route
     page.subscribe(($page) => {
-      const item = navigationItems.find(item => item.route === $page.route.id);
-      currentPage = item ? item.label : 'Home';
+      const item = navigationItems.find(
+        (item) => item.route === $page.route.id,
+      );
+      currentPage = item ? item.label : "Home";
     });
   });
 
   function updateTheme() {
     if (isDarkMode) {
-      document.documentElement.classList.add('dark');
-      localStorage.setItem('theme', 'dark');
+      document.documentElement.classList.add("dark");
+      localStorage.setItem("theme", "dark");
     } else {
-      document.documentElement.classList.remove('dark');
-      localStorage.setItem('theme', 'light');
+      document.documentElement.classList.remove("dark");
+      localStorage.setItem("theme", "light");
     }
   }
 
@@ -109,29 +111,53 @@
   }
 </script>
 
-<div class="min-h-screen bg-gray-50 dark:bg-gray-900 transition-colors duration-200 flex">
+<div
+  class="min-h-screen bg-gray-50 dark:bg-gray-900 transition-colors duration-200 flex"
+>
   <!-- Sidebar -->
   <div class="flex">
-    <div class="bg-white dark:bg-gray-800 border-r border-gray-200 dark:border-gray-700 transition-all duration-300 {sidebarCollapsed ? 'w-20' : 'w-64'}">
+    <div
+      class="bg-white dark:bg-gray-800 border-r border-gray-200 dark:border-gray-700 transition-all duration-300 {sidebarCollapsed
+        ? 'w-20'
+        : 'w-64'}"
+    >
       <!-- Sidebar Header -->
-      <div class="flex items-center justify-between h-16 px-4 border-b border-gray-200 dark:border-gray-700">
+      <div
+        class="flex items-center justify-between h-16 px-4 border-b border-gray-200 dark:border-gray-700"
+      >
         {#if !sidebarCollapsed}
           <div class="flex items-center space-x-3">
-            <div class="w-8 h-8 bg-blue-600 rounded-lg flex items-center justify-center">
-              <svg class="w-5 h-5 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                {@html getIcon('microphone')}
+            <div
+              class="w-8 h-8 bg-blue-600 rounded-lg flex items-center justify-center"
+            >
+              <svg
+                class="w-5 h-5 text-white"
+                fill="none"
+                stroke="currentColor"
+                viewBox="0 0 24 24"
+              >
+                {@html getIcon("microphone")}
               </svg>
             </div>
-            <h1 class="text-lg font-semibold text-gray-900 dark:text-white">TalkToMe</h1>
+            <h1 class="text-lg font-semibold text-gray-900 dark:text-white">
+              TalkToMe
+            </h1>
           </div>
         {/if}
-        <button 
+        <button
           on:click={toggleSidebar}
-          class="p-2 rounded-lg hover:bg-gray-100 dark:hover:bg-gray-700 transition-colors {sidebarCollapsed ? 'mx-auto' : ''}"
+          class="p-2 rounded-lg hover:bg-gray-100 dark:hover:bg-gray-700 transition-colors {sidebarCollapsed
+            ? 'mx-auto'
+            : ''}"
           aria-label="Toggle sidebar"
         >
-          <svg class="w-5 h-5 text-gray-600 dark:text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-            {@html getIcon('menu')}
+          <svg
+            class="w-5 h-5 text-gray-600 dark:text-gray-400"
+            fill="none"
+            stroke="currentColor"
+            viewBox="0 0 24 24"
+          >
+            {@html getIcon("menu")}
           </svg>
         </button>
       </div>
@@ -141,14 +167,22 @@
         {#each navigationItems as item}
           <button
             on:click={() => navigateTo(item.route, item.label)}
-            class="w-full flex items-center {sidebarCollapsed ? 'px-3 py-3 justify-center' : 'px-3 py-2 justify-start'} text-sm font-medium rounded-lg transition-colors duration-200 {
-              $page.route.id === item.route 
-                ? 'bg-blue-100 text-blue-900 dark:bg-blue-900 dark:text-blue-100' 
-                : 'text-gray-700 hover:bg-gray-100 dark:text-gray-300 dark:hover:bg-gray-700'
-            }"
-            title={sidebarCollapsed ? item.label : ''}
+            class="w-full flex items-center {sidebarCollapsed
+              ? 'px-3 py-3 justify-center'
+              : 'px-3 py-2 justify-start'} text-sm font-medium rounded-lg transition-colors duration-200 {$page
+              .route.id === item.route
+              ? 'bg-blue-100 text-blue-900 dark:bg-blue-900 dark:text-blue-100'
+              : 'text-gray-700 hover:bg-gray-100 dark:text-gray-300 dark:hover:bg-gray-700'}"
+            title={sidebarCollapsed ? item.label : ""}
           >
-            <svg class="{sidebarCollapsed ? 'w-8 h-8' : 'w-5 h-5'} {sidebarCollapsed ? '' : 'mr-3'}" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <svg
+              class="{sidebarCollapsed
+                ? 'w-8 h-8'
+                : 'w-5 h-5'} {sidebarCollapsed ? '' : 'mr-3'}"
+              fill="none"
+              stroke="currentColor"
+              viewBox="0 0 24 24"
+            >
               {@html getIcon(item.icon)}
             </svg>
             {#if !sidebarCollapsed}
@@ -157,56 +191,18 @@
           </button>
         {/each}
       </nav>
-
-      <!-- Sidebar Footer -->
-      {#if !sidebarCollapsed}
-        <div class="p-4 border-t border-gray-200 dark:border-gray-700">
-          <div class="flex items-center justify-between">
-            <span class="text-sm text-gray-600 dark:text-gray-400">Theme</span>
-            <button 
-              on:click={toggleTheme}
-              class="p-2 rounded-lg hover:bg-gray-100 dark:hover:bg-gray-700 transition-colors"
-              aria-label="Toggle theme"
-            >
-              {#if isDarkMode}
-                <svg class="w-5 h-5 text-gray-600 dark:text-gray-400" fill="currentColor" viewBox="0 0 20 20">
-                  <path fill-rule="evenodd" d="M10 2a1 1 0 011 1v1a1 1 0 11-2 0V3a1 1 0 011-1zm4 8a4 4 0 11-8 0 4 4 0 018 0zm-.464 4.95l.707.707a1 1 0 001.414-1.414l-.707-.707a1 1 0 00-1.414 1.414zm2.12-10.607a1 1 0 010 1.414l-.706.707a1 1 0 11-1.414-1.414l.707-.707a1 1 0 011.414 0zM17 11a1 1 0 100-2h-1a1 1 0 100 2h1zm-7 4a1 1 0 011 1v1a1 1 0 11-2 0v-1a1 1 0 011-1zM5.05 6.464A1 1 0 106.465 5.05l-.708-.707a1 1 0 00-1.414 1.414l.707.707zm1.414 8.486l-.707.707a1 1 0 01-1.414-1.414l.707-.707a1 1 0 011.414 1.414zM4 11a1 1 0 100-2H3a1 1 0 000 2h1z" clip-rule="evenodd" />
-                </svg>
-              {:else}
-                <svg class="w-5 h-5 text-gray-600 dark:text-gray-400" fill="currentColor" viewBox="0 0 20 20">
-                  <path d="M17.293 13.293A8 8 0 716.707 2.707a8.001 8.001 0 1010.586 10.586z" />
-                </svg>
-              {/if}
-            </button>
-          </div>
-        </div>
-      {:else}
-        <div class="p-4 border-t border-gray-200 dark:border-gray-700">
-          <button 
-            on:click={toggleTheme}
-            class="w-full p-2 rounded-lg hover:bg-gray-100 dark:hover:bg-gray-700 transition-colors"
-            aria-label="Toggle theme"
-          >
-            {#if isDarkMode}
-              <svg class="w-5 h-5 text-gray-600 dark:text-gray-400 mx-auto" fill="currentColor" viewBox="0 0 20 20">
-                <path fill-rule="evenodd" d="M10 2a1 1 0 011 1v1a1 1 0 11-2 0V3a1 1 0 011-1zm4 8a4 4 0 11-8 0 4 4 0 018 0zm-.464 4.95l.707.707a1 1 0 001.414-1.414l-.707-.707a1 1 0 00-1.414 1.414zm2.12-10.607a1 1 0 010 1.414l-.706.707a1 1 0 11-1.414-1.414l.707-.707a1 1 0 011.414 0zM17 11a1 1 0 100-2h-1a1 1 0 100 2h1zm-7 4a1 1 0 011 1v1a1 1 0 11-2 0v-1a1 1 0 011-1zM5.05 6.464A1 1 0 106.465 5.05l-.708-.707a1 1 0 00-1.414 1.414l.707.707zm1.414 8.486l-.707.707a1 1 0 01-1.414-1.414l.707-.707a1 1 0 011.414 1.414zM4 11a1 1 0 100-2H3a1 1 0 000 2h1z" clip-rule="evenodd" />
-              </svg>
-            {:else}
-              <svg class="w-5 h-5 text-gray-600 dark:text-gray-400 mx-auto" fill="currentColor" viewBox="0 0 20 20">
-                <path d="M17.293 13.293A8 8 0 716.707 2.707a8.001 8.001 0 1010.586 10.586z" />
-              </svg>
-            {/if}
-          </button>
-        </div>
-      {/if}
     </div>
   </div>
 
   <!-- Main Content -->
   <div class="flex-1 flex flex-col">
     <!-- Top Header (shows current page) -->
-    <header class="bg-white dark:bg-gray-800 shadow-sm border-b border-gray-200 dark:border-gray-700 px-6 py-4">
-      <h2 class="text-xl font-semibold text-gray-900 dark:text-white">{currentPage}</h2>
+    <header
+      class="bg-white dark:bg-gray-800 shadow-sm border-b border-gray-200 dark:border-gray-700 px-6 py-4"
+    >
+      <h2 class="text-xl font-semibold text-gray-900 dark:text-white">
+        {currentPage}
+      </h2>
     </header>
 
     <!-- Page Content -->

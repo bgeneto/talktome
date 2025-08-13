@@ -183,7 +183,7 @@
     <h3 class="text-lg font-medium text-gray-900 dark:text-white mb-4">Quick Access Languages</h3>
     <div class="bg-white dark:bg-gray-800 rounded-lg border border-gray-200 dark:border-gray-700 p-6">
       <p class="text-sm text-gray-600 dark:text-gray-400 mb-4">
-        Select languages for quick access in the system tray menu
+        Select only the languages you use frequently for quick access.
       </p>
       
       <!-- Current Quick Access -->
