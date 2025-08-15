@@ -1,80 +1,187 @@
-use log::{debug, error, info};
 use serde_json::Value;
 use std::io::Write;
 use std::path::PathBuf;
+use std::sync::Mutex;
 use tauri::{AppHandle, Manager};
+
+// Global state for debug logging
+static DEBUG_ENABLED: Mutex<bool> = Mutex::new(false);
+static LOG_PATH: Mutex<Option<PathBuf>> = Mutex::new(None);
 
 pub struct DebugLogger;
 
 impl DebugLogger {
     /// Initialize debug logging to file - only if enabled in settings
     pub fn init(app_handle: &AppHandle) -> Result<(), String> {
-        use crate::settings::get_setting_bool;
+        // Try to read debug setting from data directory or default to true for initial setup
+        // This will be properly set by init_with_state when frontend syncs settings
+        let debug_enabled = true; // Changed from false to true so initial logs are created
         
-        // Check if debug logging is enabled
-        let debug_enabled = get_setting_bool(app_handle, "debug_logging").unwrap_or(false);
-        if !debug_enabled {
-            return Ok(()); // Debug logging disabled, do nothing
-        }
+        println!("DEBUG: init() called with debug_enabled = {}", debug_enabled);
         
+        // Always set up the log path and create directory, regardless of enabled state
         let log_path = Self::get_log_path(app_handle)?;
         
         // Create log directory if it doesn't exist
         if let Some(parent) = log_path.parent() {
             std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
         }
-
-        // Initialize env_logger with custom format
-        let target = Box::new(std::fs::File::create(&log_path).map_err(|e| e.to_string())?);
         
-        env_logger::Builder::from_default_env()
-            .target(env_logger::Target::Pipe(target))
-            .format(|buf, record| {
-                writeln!(
-                    buf,
-                    "[{}] [{}] [{}:{}] {}",
-                    chrono::Utc::now().format("%Y-%m-%d %H:%M:%S%.3f UTC"),
-                    record.level(),
-                    record.file().unwrap_or("unknown"),
-                    record.line().unwrap_or(0),
-                    record.args()
-                )
-            })
-            .init();
-
-        info!("=== TalkToMe Debug Session Started ===");
-        info!("Log file: {}", log_path.display());
+        // Always store log path globally so init_with_state can use it later
+        if let Ok(mut path) = LOG_PATH.lock() {
+            *path = Some(log_path.clone());
+        }
+        
+        // Update global state AFTER setting up the path but BEFORE trying to write
+        if let Ok(mut enabled) = DEBUG_ENABLED.lock() {
+            *enabled = debug_enabled;
+        }
+        
+        // Always try to create the log path and write a test file for debugging
+        println!("DEBUG: Force-testing file creation regardless of debug_enabled state");
+        
+        // Simple absolute test - ALWAYS try this
+        let simple_test_path = std::path::Path::new("C:\\temp\\force_test.log");
+        let test_msg = format!("Force test at {}\n", chrono::Utc::now().format("%Y-%m-%d %H:%M:%S%.3f UTC"));
+        match std::fs::write(simple_test_path, test_msg) {
+            Ok(_) => println!("DEBUG: FORCE TEST SUCCESS - wrote to C:\\temp\\force_test.log"),
+            Err(e) => println!("DEBUG: FORCE TEST FAILED - Error: {}", e),
+        }
+        
+        // Only write initial messages if enabled
+        if debug_enabled {
+            println!("DEBUG: About to write initial log messages");
+            
+            // Direct file creation without going through write_log to avoid the global state check
+            let startup_content = format!(
+                "[{}] === TalkToMe Debug Session Started ===\n[{}] Log file: {}\n", 
+                chrono::Utc::now().format("%Y-%m-%d %H:%M:%S%.3f UTC"),
+                chrono::Utc::now().format("%Y-%m-%d %H:%M:%S%.3f UTC"),
+                log_path.display()
+            );
+            
+            match std::fs::write(&log_path, &startup_content) {
+                Ok(_) => println!("DEBUG: Successfully created log file with startup content: {}", log_path.display()),
+                Err(e) => println!("DEBUG: Failed to create log file: {} - Error: {}", log_path.display(), e),
+            }
+            
+            println!("DEBUG: Initial log messages written to file");
+        } else {
+            println!("DEBUG: debug_enabled is FALSE - this is why no log file is created!");
+        }
         
         Ok(())
+    }
+    
+    /// Initialize debug logging with explicit state
+    pub fn init_with_state(app_handle: &AppHandle, enabled: bool) -> Result<(), String> {
+        // Update global state
+        if let Ok(mut debug_enabled) = DEBUG_ENABLED.lock() {
+            *debug_enabled = enabled;
+        }
+        
+        if enabled {
+            let log_path = Self::get_log_path(app_handle)?;
+            
+            // Create log directory if it doesn't exist
+            if let Some(parent) = log_path.parent() {
+                std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+            }
+            
+            // Store log path globally
+            if let Ok(mut path) = LOG_PATH.lock() {
+                *path = Some(log_path.clone());
+            }
+            
+            // Write initial log message only if not already initialized
+            if !log_path.exists() || std::fs::metadata(&log_path).map(|m| m.len()).unwrap_or(0) == 0 {
+                Self::write_log(&format!("=== TalkToMe Debug Session Started ==="));
+                Self::write_log(&format!("Log file: {}", log_path.display()));
+            }
+            Self::write_log(&format!("Debug logging state changed to: enabled"));
+        } else {
+            Self::write_log(&format!("Debug logging state changed to: disabled"));
+        }
+        
+        Ok(())
+    }
+    
+    /// Write a message directly to the log file
+    fn write_log(message: &str) {
+        // Check if logging is enabled
+        let enabled = if let Ok(enabled) = DEBUG_ENABLED.lock() {
+            *enabled
+        } else {
+            return;
+        };
+        
+        if !enabled {
+            return;
+        }
+        
+        // Get log path
+        let log_path = if let Ok(path) = LOG_PATH.lock() {
+            if let Some(ref path) = *path {
+                path.clone()
+            } else {
+                return;
+            }
+        } else {
+            return;
+        };
+        
+        // Format message with timestamp
+        let timestamp = chrono::Utc::now().format("%Y-%m-%d %H:%M:%S%.3f UTC");
+        let formatted_message = format!("[{}] {}\n", timestamp, message);
+        
+        // Write to file
+        if let Ok(mut file) = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&log_path)
+        {
+            println!("DEBUG: Successfully opened log file: {}", log_path.display());
+            if let Err(e) = file.write_all(formatted_message.as_bytes()) {
+                println!("DEBUG: Failed to write to log file: {}", e);
+            } else {
+                println!("DEBUG: Successfully wrote message to log file");
+            }
+            if let Err(e) = file.flush() {
+                println!("DEBUG: Failed to flush log file: {}", e);
+            } else {
+                println!("DEBUG: Successfully flushed log file");
+            }
+        } else {
+            println!("DEBUG: Failed to open log file: {}", log_path.display());
+        }
     }
 
     /// Log audio chunk processing
     pub fn log_audio_chunk(data_len: usize, sample_rate: u32, has_activity: bool, max_amplitude: f32) {
-        // Only log if debug logging is enabled (we can't easily check settings here, so we'll rely on logger being initialized)
-        debug!("AUDIO_CHUNK: length={} samples, rate={}Hz, has_activity={}, max_amplitude={:.6}", 
-               data_len, sample_rate, has_activity, max_amplitude);
+        Self::write_log(&format!("AUDIO_CHUNK: length={} samples, rate={}Hz, has_activity={}, max_amplitude={:.6}", 
+               data_len, sample_rate, has_activity, max_amplitude));
         
         if !has_activity {
-            debug!("AUDIO_CHUNK: Skipping silent chunk (max_amplitude < 0.01)");
+            Self::write_log("AUDIO_CHUNK: Skipping silent chunk (max_amplitude < 0.01)");
         }
     }
 
     /// Log transcription request details
     pub fn log_transcription_request(audio_size: usize, endpoint: &str) {
-        info!("STT_REQUEST: Sending audio to Whisper API");
-        debug!("STT_REQUEST: audio_size={} bytes, endpoint={}", audio_size, endpoint);
+        Self::write_log(&format!("STT_REQUEST: Sending audio to Whisper API"));
+        Self::write_log(&format!("STT_REQUEST: audio_size={} bytes, endpoint={}", audio_size, endpoint));
     }
 
     /// Log transcription response
     pub fn log_transcription_response(success: bool, text: Option<&str>, error: Option<&str>) {
         if success {
             if let Some(text) = text {
-                info!("STT_RESPONSE: SUCCESS - '{}'", text);
-                debug!("STT_RESPONSE: transcript_length={} chars", text.len());
+                Self::write_log(&format!("STT_RESPONSE: SUCCESS - '{}'", text));
+                Self::write_log(&format!("STT_RESPONSE: transcript_length={} chars", text.len()));
             }
         } else {
             if let Some(error) = error {
-                error!("STT_RESPONSE: ERROR - {}", error);
+                Self::write_log(&format!("STT_RESPONSE: ERROR - {}", error));
             }
         }
     }
@@ -87,29 +194,29 @@ impl DebugLogger {
         translation_enabled: bool,
         prompt: &str
     ) {
-        info!("TRANSLATION_REQUEST: Processing text");
-        debug!("TRANSLATION_REQUEST: original='{}', source_lang={}, target_lang={}, enabled={}", 
-               original_text, source_lang, target_lang, translation_enabled);
-        debug!("TRANSLATION_REQUEST: Full prompt: '{}'", prompt);
+        Self::write_log(&format!("TRANSLATION_REQUEST: Processing text"));
+        Self::write_log(&format!("TRANSLATION_REQUEST: original='{}', source_lang={}, target_lang={}, enabled={}", 
+               original_text, source_lang, target_lang, translation_enabled));
+        Self::write_log(&format!("TRANSLATION_REQUEST: Full prompt: '{}'", prompt));
     }
 
     /// Log translation API request payload
     pub fn log_api_payload(payload: &Value, endpoint: &str) {
-        info!("API_REQUEST: Sending request to {}", endpoint);
-        debug!("API_REQUEST: Full payload: {}", serde_json::to_string_pretty(payload).unwrap_or_default());
+        Self::write_log(&format!("API_REQUEST: Sending request to {}", endpoint));
+        Self::write_log(&format!("API_REQUEST: Full payload: {}", serde_json::to_string_pretty(payload).unwrap_or_default()));
         
         // Log specific important fields
         if let Some(messages) = payload["messages"].as_array() {
             for (i, msg) in messages.iter().enumerate() {
                 if let (Some(role), Some(content)) = (msg["role"].as_str(), msg["content"].as_str()) {
-                    debug!("API_REQUEST: Message[{}] role={}, content_length={}", i, role, content.len());
-                    debug!("API_REQUEST: Message[{}] content: '{}'", i, content);
+                    Self::write_log(&format!("API_REQUEST: Message[{}] role={}, content_length={}", i, role, content.len()));
+                    Self::write_log(&format!("API_REQUEST: Message[{}] content: '{}'", i, content));
                 }
             }
         }
         
         if let Some(model) = payload["model"].as_str() {
-            debug!("API_REQUEST: Using model: {}", model);
+            Self::write_log(&format!("API_REQUEST: Using model: {}", model));
         }
     }
 
@@ -117,43 +224,64 @@ impl DebugLogger {
     pub fn log_translation_response(success: bool, processed_text: Option<&str>, error: Option<&str>, raw_response: Option<&str>) {
         if success {
             if let Some(text) = processed_text {
-                info!("TRANSLATION_RESPONSE: SUCCESS - '{}'", text);
-                debug!("TRANSLATION_RESPONSE: processed_length={} chars", text.len());
+                Self::write_log(&format!("TRANSLATION_RESPONSE: SUCCESS - '{}'", text));
+                Self::write_log(&format!("TRANSLATION_RESPONSE: processed_length={} chars", text.len()));
             }
         } else {
-            error!("TRANSLATION_RESPONSE: ERROR - {}", error.unwrap_or("Unknown error"));
+            Self::write_log(&format!("TRANSLATION_RESPONSE: ERROR - {}", error.unwrap_or("Unknown error")));
         }
         
         if let Some(raw) = raw_response {
-            debug!("TRANSLATION_RESPONSE: Raw API response: {}", raw);
+            Self::write_log(&format!("TRANSLATION_RESPONSE: Raw API response: {}", raw));
         }
     }
 
     /// Log text insertion
     pub fn log_text_insertion(text: &str, success: bool, error: Option<&str>) {
-        info!("TEXT_INSERTION: Inserting text: '{}'", text);
+        Self::write_log(&format!("TEXT_INSERTION: Inserting text: '{}'", text));
         
         if success {
-            info!("TEXT_INSERTION: SUCCESS");
+            Self::write_log("TEXT_INSERTION: SUCCESS");
         } else {
-            error!("TEXT_INSERTION: ERROR - {}", error.unwrap_or("Unknown error"));
+            Self::write_log(&format!("TEXT_INSERTION: ERROR - {}", error.unwrap_or("Unknown error")));
         }
     }
 
     /// Log pipeline errors
     pub fn log_pipeline_error(stage: &str, error: &str) {
-        error!("PIPELINE_ERROR: Stage '{}' failed: {}", stage, error);
+        Self::write_log(&format!("PIPELINE_ERROR: Stage '{}' failed: {}", stage, error));
     }
 
     /// Log general info
     pub fn log_info(message: &str) {
-        info!("{}", message);
+        Self::write_log(message);
     }
 
     /// Get log file path
     fn get_log_path(app_handle: &AppHandle) -> Result<PathBuf, String> {
+        let data_dir = Self::get_portable_data_dir(app_handle)?;
+        Ok(data_dir.join("logs").join("talktome.log"))
+    }
+
+    /// Get portable data directory - same logic as settings
+    fn get_portable_data_dir(app_handle: &AppHandle) -> Result<PathBuf, String> {
+        // Try to get the executable directory first for portable mode
+        if let Ok(exe_path) = std::env::current_exe() {
+            if let Some(exe_dir) = exe_path.parent() {
+                let portable_dir = exe_dir.join("data");
+                
+                // Check if we can write to the exe directory (portable mode)
+                if let Ok(_) = std::fs::create_dir_all(&portable_dir) {
+                    if portable_dir.exists() {
+                        return Ok(portable_dir);
+                    }
+                }
+            }
+        }
+        
+        // Fallback to app data directory
         let app_dir = app_handle.path().app_data_dir().map_err(|e| e.to_string())?;
-        Ok(app_dir.join("talktome.log"))
+        Ok(app_dir)
     }
 
     /// Get current log file path for frontend
@@ -182,7 +310,7 @@ impl DebugLogger {
     pub fn clear_log(app_handle: &AppHandle) -> Result<(), String> {
         let log_path = Self::get_log_path(app_handle)?;
         std::fs::write(&log_path, "").map_err(|e| e.to_string())?;
-        info!("=== Log file cleared ===");
+        Self::write_log("=== Log file cleared ===");
         Ok(())
     }
 }

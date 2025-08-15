@@ -1,6 +1,7 @@
 <script lang="ts">
   import { onMount } from 'svelte';
   import { get } from 'svelte/store';
+  import { invoke } from '@tauri-apps/api/core';
   import { settings } from '../../lib/stores/settingsStore';
 
   let currentSettings = {
@@ -20,6 +21,7 @@
   let isTestingApi = false;
   let apiTestResult: { success: boolean; message: string; details?: string } | null = null;
   let saveError: string | null = null;
+  let dataDirectoryInfo: any = null;
 
   onMount(() => {
     // Subscribe to settings changes
@@ -27,8 +29,19 @@
       currentSettings = { ...s };
     });
     
+    // Load data directory info
+    loadDataDirectoryInfo();
+    
     return () => unsubscribe();
   });
+
+  async function loadDataDirectoryInfo() {
+    try {
+      dataDirectoryInfo = await invoke('get_data_directory_info');
+    } catch (error) {
+      console.error('Failed to load data directory info:', error);
+    }
+  }
 
   // Handle changes to specific settings
   function handleAutoMuteChange() {
@@ -63,13 +76,25 @@
     // Cast since the store's Settings type includes extra fields we preserve from get(settings)
     settings.set(merged as any);
     
-    // Update backend for specific settings that require it
+    // Use proper setters to ensure backend sync instead of old individual commands
     if (updated.hasOwnProperty('autoMute')) {
-      invoke('update_auto_mute', { enabled: updated.autoMute }).catch(console.error);
+      settings.setAutoMute(updated.autoMute!);
     }
     
     if (updated.hasOwnProperty('debugLogging')) {
-      invoke('update_debug_logging', { enabled: updated.debugLogging }).catch(console.error);
+      settings.setDebugLogging(updated.debugLogging!);
+    }
+    
+    if (updated.hasOwnProperty('theme')) {
+      settings.setTheme(updated.theme!);
+    }
+    
+    if (updated.hasOwnProperty('apiEndpoint')) {
+      settings.setApiEndpoint(updated.apiEndpoint!);
+    }
+    
+    if (updated.hasOwnProperty('apiKey')) {
+      settings.setApiKey(updated.apiKey!);
     }
   }
 
@@ -135,7 +160,7 @@
     };
   }
 
-function savePreferences() {
+async function savePreferences() {
     if (isSaving) return;
     isSaving = true;
     saveError = null;
@@ -154,36 +179,39 @@ function savePreferences() {
       return;
     }
 
-    // Test API connectivity first
-    testApiConnectivity()
-      .then(() => {
-        if (apiTestResult?.success) {
-          // API test passed, save settings
-          persistSettings(currentSettings);
-          applyTheme(currentSettings.theme as 'auto' | 'light' | 'dark');
+    try {
+      // Test API connectivity using the settings store method
+      const testResult = await settings.testApiConnectivity(
+        currentSettings.apiEndpoint.trim(),
+        currentSettings.apiKey.trim()
+      );
 
-          // Update hotkeys in the backend
-          if (currentSettings.hotkeys) {
-            const { pushToTalk, handsFree } = currentSettings.hotkeys;
-            settings.updateHotkeys({ pushToTalk, handsFree });
-          }
+      if (testResult.success) {
+        // API test passed, save settings
+        persistSettings(currentSettings);
+        applyTheme(currentSettings.theme as 'auto' | 'light' | 'dark');
 
-          // Visual feedback
-          saveSuccess = true;
-          setTimeout(() => {
-            saveSuccess = false;
-          }, 3000);
-        } else {
-          // API test failed
-          saveError = 'Cannot save preferences: API connectivity test failed. Please check your API endpoint and key.';
+        // Update hotkeys in the backend
+        if (currentSettings.hotkeys) {
+          const { pushToTalk, handsFree } = currentSettings.hotkeys;
+          settings.updateHotkeys({ pushToTalk, handsFree });
         }
-        isSaving = false;
-      })
-      .catch((error) => {
-        console.error('Error during save:', error);
-        saveError = 'Failed to save preferences. Please try again.';
-        isSaving = false;
-      });
+
+        // Visual feedback
+        saveSuccess = true;
+        setTimeout(() => {
+          saveSuccess = false;
+        }, 3000);
+      } else {
+        // API test failed
+        saveError = testResult.message || 'Cannot save preferences: API connectivity test failed. Please check your API endpoint and key.';
+      }
+    } catch (error) {
+      console.error('Error during save:', error);
+      saveError = 'Failed to save preferences. Please try again.';
+    } finally {
+      isSaving = false;
+    }
   }
 
   function resetToDefaults() {
@@ -433,6 +461,36 @@ function savePreferences() {
         <p class="ml-6 text-xs text-gray-500 dark:text-gray-400">
           Log detailed information about the record → transcribe → translate pipeline to help troubleshoot issues
         </p>
+        
+        <!-- Debug logging info -->
+        {#if currentSettings.debugLogging}
+          <div class="ml-6 mt-2 p-3 bg-blue-50 dark:bg-blue-900/20 border border-blue-200 dark:border-blue-800 rounded">
+            <p class="text-xs text-blue-700 dark:text-blue-300">
+              ✅ Debug logging enabled
+            </p>
+            {#if dataDirectoryInfo}
+              <p class="text-xs text-blue-600 dark:text-blue-400 mt-1">
+                Mode: <strong>{dataDirectoryInfo.isPortable ? 'Portable' : 'Standard'}</strong>
+              </p>
+              <p class="text-xs text-blue-600 dark:text-blue-400 mt-1">
+                Log file: <code class="bg-white dark:bg-gray-800 px-1 py-0.5 rounded text-xs break-all">{dataDirectoryInfo.logFile}</code>
+              </p>
+              <p class="text-xs text-blue-600 dark:text-blue-400 mt-1">
+                Data directory: <code class="bg-white dark:bg-gray-800 px-1 py-0.5 rounded text-xs break-all">{dataDirectoryInfo.dataDirectory}</code>
+              </p>
+            {:else}
+              <p class="text-xs text-blue-600 dark:text-blue-400 mt-1">
+                Logs will be saved to: <code class="bg-white dark:bg-gray-800 px-1 py-0.5 rounded text-xs">./data/logs/talktome.log</code> (or AppData if not portable)
+              </p>
+            {/if}
+            <button 
+              on:click={() => invoke('get_log_file_path').then(path => navigator.clipboard.writeText(path)).catch(console.error)}
+              class="mt-2 text-xs text-blue-600 dark:text-blue-400 underline hover:text-blue-800 dark:hover:text-blue-200"
+            >
+              Copy log path to clipboard
+            </button>
+          </div>
+        {/if}
       </div>
     </div>
   </section>

@@ -83,9 +83,6 @@
   ];
     
     onMount(async () => {
-        // Initialize speech recognition only if needed
-        // This will be done in startRecording function
-      
         // Listen for tray menu events
         const unlistenSpokenLanguage = await listen('tray-spoken-language-change', (event) => {
             const language = event.payload as string;
@@ -161,7 +158,16 @@
   async function startRecording() {
       // Try to start recording with Rust backend services first
       try {
-        await invoke('start_recording');
+        // Get current settings from localStorage
+        const currentSettings = get(settings);
+        
+        await invoke('start_recording', {
+          spokenLanguage: currentSettings.spokenLanguage,
+          translationLanguage: currentSettings.translationLanguage,
+          apiEndpoint: currentSettings.apiEndpoint,
+          autoMute: currentSettings.autoMute,
+          translationEnabled: currentSettings.translationLanguage !== 'none'
+        });
         isRecording = true;
         isListening = true;
         transcribedText = '';
@@ -331,7 +337,7 @@
   </div>
 
       <!-- Recording Button -->
-      <div class="flex justify-center mb-8">
+      <div class="flex justify-center mb-8 gap-4">
         <button
           on:click={isRecording ? stopRecording : startRecording}
           class="relative w-24 h-24 rounded-full transition-all duration-200 transform hover:scale-105 focus:outline-none focus:ring-4 focus:ring-blue-300/50 shadow-lg"

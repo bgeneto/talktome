@@ -45,33 +45,8 @@ impl Default for AppSettings {
 }
 
 impl AppSettings {
-    pub fn load(app_handle: &AppHandle) -> Result<Self, Box<dyn std::error::Error>> {
-        let settings_path = Self::get_settings_path(app_handle)?;
-        
-        if settings_path.exists() {
-            let content = fs::read_to_string(settings_path)?;
-            let settings: AppSettings = serde_json::from_str(&content)?;
-            Ok(settings)
-        } else {
-            // Return default settings if file doesn't exist
-            let default_settings = AppSettings::default();
-            default_settings.save(app_handle)?;
-            Ok(default_settings)
-        }
-    }
-
-    pub fn save(&self, app_handle: &AppHandle) -> Result<(), String> {
-        let settings_path = Self::get_settings_path(app_handle)?;
-        
-        // Create directory if it doesn't exist
-        if let Some(parent) = settings_path.parent() {
-            fs::create_dir_all(parent).map_err(|e| e.to_string())?;
-        }
-        
-        let content = serde_json::to_string_pretty(self).map_err(|e| e.to_string())?;
-        fs::write(settings_path, content).map_err(|e| e.to_string())?;
-        Ok(())
-    }
+    // Note: load() and save() methods removed - now using localStorage-only approach
+    // AppSettings struct is kept for internal backend operations like tray menu updates
 
     /// Get API key from secure file storage (temporary solution, can be upgraded to Stronghold later)
     pub fn get_api_key(&self, app_handle: &AppHandle) -> Result<String, String> {
@@ -106,25 +81,30 @@ impl AppSettings {
         self.get_api_key(app_handle).is_ok()
     }
 
-    fn get_settings_path(app_handle: &AppHandle) -> Result<PathBuf, String> {
-        let app_dir = app_handle.path().app_data_dir().map_err(|e| e.to_string())?;
-        Ok(app_dir.join("settings.json"))
-    }
-
     fn get_api_key_path(app_handle: &AppHandle) -> Result<PathBuf, String> {
-        let app_dir = app_handle.path().app_data_dir().map_err(|e| e.to_string())?;
+        let app_dir = Self::get_portable_data_dir(app_handle)?;
         Ok(app_dir.join("api.key"))
     }
-}
 
-// Helper functions for getting specific settings
-pub fn get_setting_bool(app_handle: &AppHandle, key: &str) -> Result<bool, String> {
-    let settings = AppSettings::load(app_handle).map_err(|e| e.to_string())?;
-    match key {
-        "auto_save" => Ok(settings.auto_save),
-        "auto_mute" => Ok(settings.auto_mute),
-        "translation_enabled" => Ok(settings.translation_enabled),
-        "debug_logging" => Ok(settings.debug_logging),
-        _ => Err(format!("Unknown boolean setting: {}", key))
+    /// Get portable data directory - tries local first, falls back to app_data_dir
+    fn get_portable_data_dir(app_handle: &AppHandle) -> Result<PathBuf, String> {
+        // Try to get the executable directory first for portable mode
+        if let Ok(exe_path) = std::env::current_exe() {
+            if let Some(exe_dir) = exe_path.parent() {
+                let portable_dir = exe_dir.join("data");
+                
+                // Check if we can write to the exe directory (portable mode)
+                if let Ok(_) = std::fs::create_dir_all(&portable_dir) {
+                    if portable_dir.exists() {
+                        return Ok(portable_dir);
+                    }
+                }
+            }
+        }
+        
+        // Fallback to app data directory
+        let app_dir = app_handle.path().app_data_dir().map_err(|e| e.to_string())?;
+        Ok(app_dir)
     }
 }
+

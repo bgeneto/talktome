@@ -52,10 +52,8 @@ function createSettingsStore() {
       } as Settings;
       // Persist migration if we dropped/changed keys
       localStorage.setItem('talktome-settings', JSON.stringify(initialSettings));
-      console.log('Loaded settings from localStorage (migrated if needed):', initialSettings);
     } else {
       initialSettings = defaultSettings;
-      console.log('Using default settings, no localStorage found');
     }
   } catch (error) {
     console.error('Error loading settings from localStorage:', error);
@@ -64,6 +62,30 @@ function createSettingsStore() {
   
   const { subscribe, set, update } = writable(initialSettings);
 
+  const store = { subscribe, set, update };
+
+  // Create syncToBackend function that can be called by setters
+  const syncToBackend = async () => {
+    try {
+      const currentSettings = get(store);
+      
+      await invoke('save_settings_from_frontend', {
+        spoken_language: currentSettings.spokenLanguage,
+        translation_language: currentSettings.translationLanguage,
+        audio_device: currentSettings.audioDevice,
+        theme: currentSettings.theme,
+        api_endpoint: currentSettings.apiEndpoint,
+        auto_mute: currentSettings.autoMute,
+        translation_enabled: currentSettings.translationLanguage !== 'none',
+        debug_logging: currentSettings.debugLogging,
+        push_to_talk_hotkey: currentSettings.hotkeys.pushToTalk,
+        hands_free_hotkey: currentSettings.hotkeys.handsFree
+      });
+    } catch (error) {
+      console.error('Failed to sync settings to backend:', error);
+    }
+  };
+
   return {
     subscribe,
     set,
@@ -71,24 +93,22 @@ function createSettingsStore() {
     setSpokenLanguage: (language: string) => {
       update(settings => {
         const newSettings = { ...settings, spokenLanguage: language };
-        console.log('Updating spoken language to:', language);
         localStorage.setItem('talktome-settings', JSON.stringify(newSettings));
-        // Update tray menu
-        invoke('update_spoken_language', { language }).catch(err => {
-          console.error('Failed to update spoken language in tray:', err);
-        });
+        // Sync to backend
+        setTimeout(() => {
+          syncToBackend();
+        }, 0);
         return newSettings;
       });
     },
     setTranslationLanguage: (language: string) => {
       update(settings => {
         const newSettings = { ...settings, translationLanguage: language };
-        console.log('Updating translation language to:', language);
         localStorage.setItem('talktome-settings', JSON.stringify(newSettings));
-        // Update tray menu
-        invoke('update_translation_language', { language }).catch(err => {
-          console.error('Failed to update translation language in tray:', err);
-        });
+        // Sync to backend
+        setTimeout(() => {
+          syncToBackend();
+        }, 0);
         return newSettings;
       });
     },
@@ -96,18 +116,72 @@ function createSettingsStore() {
       update(settings => {
         const newSettings = { ...settings, audioDevice: device };
         localStorage.setItem('talktome-settings', JSON.stringify(newSettings));
-        // Update tray menu
-        invoke('update_audio_device', { device }).catch(err => {
-          console.error('Failed to update audio device in tray:', err);
-        });
+        // Sync to backend
+        setTimeout(() => {
+          syncToBackend();
+        }, 0);
         return newSettings;
       });
     },
     setQuickAccessLanguages: (languages: string[]) => {
       update(settings => {
         const newSettings = { ...settings, quickAccessLanguages: languages };
-        console.log('Updating quick access languages to:', languages);
         localStorage.setItem('talktome-settings', JSON.stringify(newSettings));
+        return newSettings;
+      });
+    },
+    setTheme: (theme: string) => {
+      update(settings => {
+        const newSettings = { ...settings, theme };
+        localStorage.setItem('talktome-settings', JSON.stringify(newSettings));
+        // Sync to backend for consistency
+        setTimeout(() => {
+          syncToBackend();
+        }, 0);
+        return newSettings;
+      });
+    },
+    setAutoMute: (enabled: boolean) => {
+      update(settings => {
+        const newSettings = { ...settings, autoMute: enabled };
+        localStorage.setItem('talktome-settings', JSON.stringify(newSettings));
+        // Sync to backend
+        setTimeout(() => {
+          syncToBackend();
+        }, 0);
+        return newSettings;
+      });
+    },
+    setDebugLogging: (enabled: boolean) => {
+      update(settings => {
+        const newSettings = { ...settings, debugLogging: enabled };
+        localStorage.setItem('talktome-settings', JSON.stringify(newSettings));
+        // Sync to backend
+        setTimeout(() => {
+          syncToBackend();
+        }, 0);
+        return newSettings;
+      });
+    },
+    setApiEndpoint: (endpoint: string) => {
+      update(settings => {
+        const newSettings = { ...settings, apiEndpoint: endpoint };
+        localStorage.setItem('talktome-settings', JSON.stringify(newSettings));
+        // Sync to backend for consistency
+        setTimeout(() => {
+          syncToBackend();
+        }, 0);
+        return newSettings;
+      });
+    },
+    setApiKey: (key: string) => {
+      update(settings => {
+        const newSettings = { ...settings, apiKey: key };
+        localStorage.setItem('talktome-settings', JSON.stringify(newSettings));
+        // Sync to backend for consistency
+        setTimeout(() => {
+          syncToBackend();
+        }, 0);
         return newSettings;
       });
     },
@@ -119,6 +193,10 @@ function createSettingsStore() {
         invoke('register_hotkeys', { hotkeys }).catch(err => {
           console.error('Failed to register hotkeys:', err);
         });
+        // Sync to backend for consistency
+        setTimeout(() => {
+          syncToBackend();
+        }, 0);
         return newSettings;
       });
     },
@@ -173,7 +251,10 @@ function createSettingsStore() {
         console.error('Settings validation failed:', error);
         return { valid: false, errors: ['Failed to validate settings'] };
       }
-    }
+    },
+
+    // Sync settings to backend
+    syncToBackend
   };
 }
 

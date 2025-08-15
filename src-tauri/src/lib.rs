@@ -1,6 +1,6 @@
 use tauri::{
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
-    menu::{MenuBuilder, MenuItemBuilder, SubmenuBuilder},
+    menu::{MenuBuilder, MenuItemBuilder},
     Manager, Emitter, AppHandle, State,
 };
 use tauri_plugin_global_shortcut::{Code, Modifiers, Shortcut, ShortcutState, GlobalShortcutExt};
@@ -191,7 +191,15 @@ async fn register_hotkeys(
 
 // Command to start recording
 #[tauri::command]
-async fn start_recording(app: AppHandle, recording_state: State<'_, RecordingState>) -> Result<(), String> {
+async fn start_recording(
+    app: AppHandle, 
+    recording_state: State<'_, RecordingState>,
+    spoken_language: String,
+    translation_language: String,
+    api_endpoint: String,
+    auto_mute: bool,
+    translation_enabled: bool
+) -> Result<(), String> {
     // Check if already recording
     {
         let state = recording_state.inner().lock().map_err(|e| e.to_string())?;
@@ -200,11 +208,26 @@ async fn start_recording(app: AppHandle, recording_state: State<'_, RecordingSta
         }
     }
 
-    // Load settings
-    let settings = AppSettings::load(&app).map_err(|e| e.to_string())?;
+    // Get API key (use default AppSettings instance for the method)
+    let settings_for_api = AppSettings::default();
+    let api_key = settings_for_api.get_api_key(&app).map_err(|e| e.to_string())?;
     
-    // Get API key
-    let api_key = settings.get_api_key(&app).map_err(|e| e.to_string())?;
+    // Create a settings struct for the processing pipeline
+    let settings = AppSettings {
+        spoken_language,
+        translation_language,
+        audio_device: "default".to_string(), // Not used in recording
+        theme: "auto".to_string(), // Not used in recording
+        auto_save: true, // Not used in recording
+        api_endpoint,
+        hotkeys: crate::settings::Hotkeys {
+            push_to_talk: "".to_string(), // Not used in recording
+            hands_free: "".to_string(), // Not used in recording
+        },
+        auto_mute,
+        translation_enabled,
+        debug_logging: false, // Will be set properly by frontend debug logging state
+    };
     
     // Create audio capture instance
     let mut audio_capture = AudioCapture::new();
@@ -517,108 +540,38 @@ fn quit_app(app: tauri::AppHandle) -> Result<(), String> {
     Ok(())
 }
 
-#[tauri::command]
-async fn update_spoken_language(app: AppHandle, language: String) -> Result<(), String> {
-    // Update settings and tray menu
-    let mut settings = AppSettings::load(&app).map_err(|e| e.to_string())?;
-    settings.spoken_language = language;
-    settings.save(&app)?;
-    
-    // Update tray menu
-    update_tray_menu(&app, &settings).map_err(|e| e.to_string())?;
-    
-    Ok(())
-}
+// Removed update_spoken_language - now using localStorage-only approach
 
-#[tauri::command]
-async fn update_translation_language(app: AppHandle, language: String) -> Result<(), String> {
-    // Update settings and tray menu
-    let mut settings = AppSettings::load(&app).map_err(|e| e.to_string())?;
-    settings.translation_language = language;
-    settings.save(&app)?;
-    
-    // Update tray menu
-    update_tray_menu(&app, &settings).map_err(|e| e.to_string())?;
-    
-    Ok(())
-}
+// Removed update_translation_language - now using localStorage-only approach
 
-#[tauri::command]
-async fn update_audio_device(app: AppHandle, device: String) -> Result<(), String> {
-    // Update settings and tray menu
-    let mut settings = AppSettings::load(&app).map_err(|e| e.to_string())?;
-    settings.audio_device = device;
-    settings.save(&app)?;
-    
-    // Update tray menu
-    update_tray_menu(&app, &settings).map_err(|e| e.to_string())?;
-    
-    Ok(())
-}
+// Removed update_audio_device - now using localStorage-only approach
 
 #[tauri::command]
 async fn store_api_key(app: AppHandle, api_key: String) -> Result<(), String> {
-    let settings = AppSettings::load(&app).map_err(|e| e.to_string())?;
+    let settings = AppSettings::default(); // Only need the methods, not loaded settings
     settings.store_api_key(&app, api_key)?;
     Ok(())
 }
 
 #[tauri::command]
 async fn get_api_key(app: AppHandle) -> Result<String, String> {
-    let settings = AppSettings::load(&app).map_err(|e| e.to_string())?;
+    let settings = AppSettings::default(); // Only need the methods, not loaded settings
     settings.get_api_key(&app)
 }
 
 #[tauri::command]
 async fn has_api_key(app: AppHandle) -> Result<bool, String> {
-    let settings = AppSettings::load(&app).map_err(|e| e.to_string())?;
+    let settings = AppSettings::default(); // Only need the methods, not loaded settings
     Ok(settings.has_api_key(&app))
 }
 
-#[tauri::command]
-async fn update_api_endpoint(app: AppHandle, endpoint: String) -> Result<(), String> {
-    let mut settings = AppSettings::load(&app).map_err(|e| e.to_string())?;
-    settings.api_endpoint = endpoint;
-    settings.save(&app)?;
-    Ok(())
-}
+// Removed update_api_endpoint - now using localStorage-only approach
 
-#[tauri::command]
-async fn toggle_translation(app: AppHandle, enabled: bool) -> Result<(), String> {
-    let mut settings = AppSettings::load(&app).map_err(|e| e.to_string())?;
-    settings.translation_enabled = enabled;
-    settings.save(&app)?;
-    
-    // Update tray menu
-    update_tray_menu(&app, &settings).map_err(|e| e.to_string())?;
-    
-    Ok(())
-}
+// Removed toggle_translation - now using localStorage-only approach
 
-#[tauri::command]
-async fn update_auto_mute(app: AppHandle, enabled: bool) -> Result<(), String> {
-    let mut settings = AppSettings::load(&app).map_err(|e| e.to_string())?;
-    settings.auto_mute = enabled;
-    settings.save(&app)?;
-    Ok(())
-}
+// Removed update_auto_mute - now using localStorage-only approach  
 
-#[tauri::command]
-async fn update_debug_logging(app: AppHandle, enabled: bool) -> Result<(), String> {
-    let mut settings = AppSettings::load(&app).map_err(|e| e.to_string())?;
-    settings.debug_logging = enabled;
-    settings.save(&app)?;
-    
-    // Re-initialize debug logging if enabled, or do nothing if disabled
-    if enabled {
-        DebugLogger::init(&app)?;
-        DebugLogger::log_info("Debug logging enabled");
-    } else {
-        DebugLogger::log_info("Debug logging disabled - this will be the last message");
-    }
-    
-    Ok(())
-}
+// Removed update_debug_logging - now using localStorage-only approach
 
 #[tauri::command]
 async fn get_available_audio_devices() -> Result<Vec<String>, String> {
@@ -688,153 +641,77 @@ async fn get_log_file_path(app: AppHandle) -> Result<String, String> {
     DebugLogger::get_log_file_path(&app)
 }
 
-fn update_tray_menu(app: &AppHandle, settings: &AppSettings) -> Result<(), Box<dyn std::error::Error>> {
-    // Get existing tray icon
-    let tray = app.tray_by_id("main-tray").ok_or("Tray icon not found")?;
+#[tauri::command]
+async fn get_data_directory_info(app: AppHandle) -> Result<serde_json::Value, String> {
+    use serde_json::json;
     
-    // Spoken Language submenu items with checkmarks
-    let spoken_auto_text = if settings.spoken_language == "auto" { 
-        "Auto-detect 🌐 ✓" 
-    } else { 
-        "Auto-detect 🌐" 
-    };
-    let spoken_en_text = if settings.spoken_language == "en" { 
-        "English 🇺🇸 ✓" 
-    } else { 
-        "English 🇺🇸" 
-    };
-    let spoken_pt_text = if settings.spoken_language == "pt" { 
-        "Portuguese 🇵🇹 ✓" 
-    } else { 
-        "Portuguese 🇵🇹" 
-    };
-    let spoken_es_text = if settings.spoken_language == "es" { 
-        "Spanish 🇪🇸 ✓" 
-    } else { 
-        "Spanish 🇪🇸" 
-    };
-    let spoken_fr_text = if settings.spoken_language == "fr" { 
-        "French 🇫🇷 ✓" 
-    } else { 
-        "French 🇫🇷" 
-    };
-    let spoken_de_text = if settings.spoken_language == "de" { 
-        "German 🇩🇪 ✓" 
-    } else { 
-        "German 🇩🇪" 
+    // Get the actual data directory being used
+    let data_dir = if let Ok(exe_path) = std::env::current_exe() {
+        if let Some(exe_dir) = exe_path.parent() {
+            let portable_dir = exe_dir.join("data");
+            if portable_dir.exists() {
+                ("portable", portable_dir.to_string_lossy().to_string())
+            } else {
+                let app_dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
+                ("appdata", app_dir.to_string_lossy().to_string())
+            }
+        } else {
+            let app_dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
+            ("appdata", app_dir.to_string_lossy().to_string())
+        }
+    } else {
+        let app_dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
+        ("appdata", app_dir.to_string_lossy().to_string())
     };
     
-    let spoken_auto = MenuItemBuilder::with_id("spoken_auto", spoken_auto_text).build(app)?;
-    let spoken_en = MenuItemBuilder::with_id("spoken_en", spoken_en_text).build(app)?;
-    let spoken_pt = MenuItemBuilder::with_id("spoken_pt", spoken_pt_text).build(app)?;
-    let spoken_es = MenuItemBuilder::with_id("spoken_es", spoken_es_text).build(app)?;
-    let spoken_fr = MenuItemBuilder::with_id("spoken_fr", spoken_fr_text).build(app)?;
-    let spoken_de = MenuItemBuilder::with_id("spoken_de", spoken_de_text).build(app)?;
-    let spoken_language_submenu = SubmenuBuilder::new(app, "Spoken Language")
-        .items(&[&spoken_auto, &spoken_en, &spoken_pt, &spoken_es, &spoken_fr, &spoken_de])
-        .build()?;
+    let log_path = DebugLogger::get_log_file_path(&app)?;
     
-    // Translation Language submenu items with checkmarks
-    let translation_none_text = if settings.translation_language == "none" { 
-        "None (Disable Translation) ✓" 
-    } else { 
-        "None (Disable Translation)" 
-    };
-    let translation_en_text = if settings.translation_language == "en" { 
-        "English 🇺🇸 ✓" 
-    } else { 
-        "English 🇺🇸" 
-    };
-    let translation_pt_text = if settings.translation_language == "pt" { 
-        "Portuguese 🇵🇹 ✓" 
-    } else { 
-        "Portuguese 🇵🇹" 
-    };
-    let translation_es_text = if settings.translation_language == "es" { 
-        "Spanish 🇪🇸 ✓" 
-    } else { 
-        "Spanish 🇪🇸" 
-    };
-    let translation_fr_text = if settings.translation_language == "fr" { 
-        "French 🇫🇷 ✓" 
-    } else { 
-        "French 🇫🇷" 
-    };
-    let translation_de_text = if settings.translation_language == "de" { 
-        "German 🇩🇪 ✓" 
-    } else { 
-        "German 🇩🇪" 
-    };
-    
-    let translation_none = MenuItemBuilder::with_id("translation_none", translation_none_text).build(app)?;
-    let translation_en = MenuItemBuilder::with_id("translation_en", translation_en_text).build(app)?;
-    let translation_pt = MenuItemBuilder::with_id("translation_pt", translation_pt_text).build(app)?;
-    let translation_es = MenuItemBuilder::with_id("translation_es", translation_es_text).build(app)?;
-    let translation_fr = MenuItemBuilder::with_id("translation_fr", translation_fr_text).build(app)?;
-    let translation_de = MenuItemBuilder::with_id("translation_de", translation_de_text).build(app)?;
-    let translation_language_submenu = SubmenuBuilder::new(app, "Translation Language")
-        .items(&[&translation_none, &translation_en, &translation_pt, &translation_es, &translation_fr, &translation_de])
-        .build()?;
-    
-    // Audio Settings submenu items with checkmarks
-    let audio_default_text = if settings.audio_device == "default" { 
-        "Default Microphone ✓" 
-    } else { 
-        "Default Microphone" 
-    };
-    let audio_headset_text = if settings.audio_device == "mic1" { 
-        "Headset Microphone (USB) ✓" 
-    } else { 
-        "Headset Microphone (USB)" 
-    };
-    let audio_builtin_text = if settings.audio_device == "mic2" { 
-        "Built-in Microphone ✓" 
-    } else { 
-        "Built-in Microphone" 
-    };
-    let audio_external_text = if settings.audio_device == "mic3" { 
-        "External Microphone (3.5mm) ✓" 
-    } else { 
-        "External Microphone (3.5mm)" 
-    };
-    
-    let audio_default = MenuItemBuilder::with_id("audio_default", audio_default_text).build(app)?;
-    let audio_headset = MenuItemBuilder::with_id("audio_headset", audio_headset_text).build(app)?;
-    let audio_builtin = MenuItemBuilder::with_id("audio_builtin", audio_builtin_text).build(app)?;
-    let audio_external = MenuItemBuilder::with_id("audio_external", audio_external_text).build(app)?;
-    let audio_settings_submenu = SubmenuBuilder::new(app, "Audio Input")
-        .items(&[&audio_default, &audio_headset, &audio_builtin, &audio_external])
-        .build()?;
-    
-    // Other menu items
-    let show_hide = MenuItemBuilder::with_id("show_hide", "Show/Hide TalkToMe").build(app)?;
-    let start_recording = MenuItemBuilder::with_id("start_recording", "Start Recording").build(app)?;
-    let stop_recording = MenuItemBuilder::with_id("stop_recording", "Stop Recording").enabled(false).build(app)?;
-    let recording_submenu = SubmenuBuilder::new(app, "Recording")
-        .items(&[&start_recording, &stop_recording])
-        .build()?;
-    
-    let preferences = MenuItemBuilder::with_id("preferences", "Preferences...").build(app)?;
-    let language_settings = MenuItemBuilder::with_id("language_settings", "Language Settings").build(app)?;
-    let audio_settings = MenuItemBuilder::with_id("audio_settings", "Audio Settings").build(app)?;
-    let settings_submenu = SubmenuBuilder::new(app, "Settings")
-        .items(&[&preferences, &language_settings, &audio_settings, &spoken_language_submenu, &translation_language_submenu, &audio_settings_submenu])
-        .build()?;
-    
-    let about = MenuItemBuilder::with_id("about", "About TalkToMe").build(app)?;
-    let quit = MenuItemBuilder::with_id("quit", "Quit").build(app)?;
+    Ok(json!({
+        "mode": data_dir.0,
+        "dataDirectory": data_dir.1,
+        "settingsFile": format!("{}/settings.json", data_dir.1),
+        "apiKeyFile": format!("{}/api.key", data_dir.1),
+        "logFile": log_path,
+        "isPortable": data_dir.0 == "portable"
+    }))
+}
 
-    let tray_menu = MenuBuilder::new(app)
-        .items(&[
-            &show_hide,
-            &recording_submenu,
-            &settings_submenu,
-            &about,
-            &quit,
-        ])
-        .build()?;
+// New commands for localStorage-based settings
+#[tauri::command]
+async fn load_settings_from_frontend() -> Result<String, String> {
+    // This is a placeholder - the frontend will handle localStorage directly
+    // We just return "ok" to indicate the command exists
+    Ok("localStorage".to_string())
+}
+
+#[tauri::command]
+async fn save_settings_from_frontend(
+    app: AppHandle,
+    spoken_language: String,
+    translation_language: String,
+    audio_device: String,
+    theme: String,
+    api_endpoint: String,
+    auto_mute: bool,
+    translation_enabled: bool,
+    debug_logging: bool,
+    push_to_talk_hotkey: String,
+    hands_free_hotkey: String
+) -> Result<(), String> {
+    // Log the settings being saved
+    DebugLogger::log_info(&format!("SETTINGS_SAVE: spoken_language={}, translation_language={}, audio_device={}, theme={}, api_endpoint={}, auto_mute={}, translation_enabled={}, debug_logging={}, push_to_talk={}, hands_free={}", 
+        spoken_language, translation_language, audio_device, theme, api_endpoint, auto_mute, translation_enabled, debug_logging, push_to_talk_hotkey, hands_free_hotkey));
+
+    // Re-initialize debug logging with the new state
+    DebugLogger::init_with_state(&app, debug_logging)?;
     
-    tray.set_menu(Some(tray_menu))?;
+    Ok(())
+}
+
+#[tauri::command]
+async fn init_debug_logging(app: AppHandle, enabled: bool) -> Result<(), String> {
+    DebugLogger::log_info(&format!("Debug logging manually set to: {}", enabled));
+    DebugLogger::init_with_state(&app, enabled)?;
     Ok(())
 }
 
@@ -851,179 +728,53 @@ pub fn run() {
             stop_recording, 
             toggle_window, 
             quit_app, 
-            update_spoken_language, 
-            update_translation_language, 
-            update_audio_device, 
             register_hotkeys, 
             test_stt_api, 
             validate_settings,
             store_api_key,
             get_api_key,
             has_api_key,
-            update_api_endpoint,
-            toggle_translation,
-            update_auto_mute,
-            update_debug_logging,
             get_available_audio_devices,
             test_audio_capture,
             get_recording_status,
             get_debug_logs,
             clear_debug_logs,
-            get_log_file_path
+            get_log_file_path,
+            get_data_directory_info,
+            load_settings_from_frontend,
+            save_settings_from_frontend,
+            init_debug_logging
         ])
         .setup(|app| {
-            // Initialize debug logging first
+            // Initialize debug logging first (disabled by default, will be enabled by frontend)
             if let Err(e) = DebugLogger::init(&app.handle()) {
                 eprintln!("Failed to initialize debug logging: {}", e);
             }
             
             DebugLogger::log_info("TalkToMe application starting up");
+            DebugLogger::log_info("Using localStorage-based settings (no settings.json file)");
+            DebugLogger::log_info("Initialized with default settings for tray menu");
             
-            // Load current settings
-            let settings = AppSettings::load(&app.handle()).unwrap_or_default();
-            
-            DebugLogger::log_info(&format!("Loaded settings: spoken_lang={}, target_lang={}, translation_enabled={}, auto_mute={}", 
-                settings.spoken_language, settings.translation_language, settings.translation_enabled, settings.auto_mute));
-            
-            // Create the system tray menu with checkmarks
+            // Create a simple system tray menu without problematic dynamic submenus
             let tray_menu = {
-                // Spoken Language submenu items with checkmarks
-                let spoken_auto_text = if settings.spoken_language == "auto" { 
-                    "Auto-detect 🌐 ✓" 
-                } else { 
-                    "Auto-detect 🌐" 
-                };
-                let spoken_en_text = if settings.spoken_language == "en" { 
-                    "English 🇺🇸 ✓" 
-                } else { 
-                    "English 🇺🇸" 
-                };
-                let spoken_pt_text = if settings.spoken_language == "pt" { 
-                    "Portuguese 🇵🇹 ✓" 
-                } else { 
-                    "Portuguese 🇵🇹" 
-                };
-                let spoken_es_text = if settings.spoken_language == "es" { 
-                    "Spanish 🇪🇸 ✓" 
-                } else { 
-                    "Spanish 🇪🇸" 
-                };
-                let spoken_fr_text = if settings.spoken_language == "fr" { 
-                    "French 🇫🇷 ✓" 
-                } else { 
-                    "French 🇫🇷" 
-                };
-                let spoken_de_text = if settings.spoken_language == "de" { 
-                    "German 🇩🇪 ✓" 
-                } else { 
-                    "German 🇩🇪" 
-                };
-                
-                let spoken_auto = MenuItemBuilder::with_id("spoken_auto", spoken_auto_text).build(app)?;
-                let spoken_en = MenuItemBuilder::with_id("spoken_en", spoken_en_text).build(app)?;
-                let spoken_pt = MenuItemBuilder::with_id("spoken_pt", spoken_pt_text).build(app)?;
-                let spoken_es = MenuItemBuilder::with_id("spoken_es", spoken_es_text).build(app)?;
-                let spoken_fr = MenuItemBuilder::with_id("spoken_fr", spoken_fr_text).build(app)?;
-                let spoken_de = MenuItemBuilder::with_id("spoken_de", spoken_de_text).build(app)?;
-                let spoken_language_submenu = SubmenuBuilder::new(app, "Spoken Language")
-                    .items(&[&spoken_auto, &spoken_en, &spoken_pt, &spoken_es, &spoken_fr, &spoken_de])
-                    .build()?;
-                
-                // Translation Language submenu items with checkmarks
-                let translation_none_text = if settings.translation_language == "none" { 
-                    "None (Disable Translation) ✓" 
-                } else { 
-                    "None (Disable Translation)" 
-                };
-                let translation_en_text = if settings.translation_language == "en" { 
-                    "English 🇺🇸 ✓" 
-                } else { 
-                    "English 🇺🇸" 
-                };
-                let translation_pt_text = if settings.translation_language == "pt" { 
-                    "Portuguese 🇵🇹 ✓" 
-                } else { 
-                    "Portuguese 🇵🇹" 
-                };
-                let translation_es_text = if settings.translation_language == "es" { 
-                    "Spanish 🇪🇸 ✓" 
-                } else { 
-                    "Spanish 🇪🇸" 
-                };
-                let translation_fr_text = if settings.translation_language == "fr" { 
-                    "French 🇫🇷 ✓" 
-                } else { 
-                    "French 🇫🇷" 
-                };
-                let translation_de_text = if settings.translation_language == "de" { 
-                    "German 🇩🇪 ✓" 
-                } else { 
-                    "German 🇩🇪" 
-                };
-                
-                let translation_none = MenuItemBuilder::with_id("translation_none", translation_none_text).build(app)?;
-                let translation_en = MenuItemBuilder::with_id("translation_en", translation_en_text).build(app)?;
-                let translation_pt = MenuItemBuilder::with_id("translation_pt", translation_pt_text).build(app)?;
-                let translation_es = MenuItemBuilder::with_id("translation_es", translation_es_text).build(app)?;
-                let translation_fr = MenuItemBuilder::with_id("translation_fr", translation_fr_text).build(app)?;
-                let translation_de = MenuItemBuilder::with_id("translation_de", translation_de_text).build(app)?;
-                let translation_language_submenu = SubmenuBuilder::new(app, "Translation Language")
-                    .items(&[&translation_none, &translation_en, &translation_pt, &translation_es, &translation_fr, &translation_de])
-                    .build()?;
-                
-                // Audio Settings submenu items with checkmarks
-                let audio_default_text = if settings.audio_device == "default" { 
-                    "Default Microphone ✓" 
-                } else { 
-                    "Default Microphone" 
-                };
-                let audio_headset_text = if settings.audio_device == "mic1" { 
-                    "Headset Microphone (USB) ✓" 
-                } else { 
-                    "Headset Microphone (USB)" 
-                };
-                let audio_builtin_text = if settings.audio_device == "mic2" { 
-                    "Built-in Microphone ✓" 
-                } else { 
-                    "Built-in Microphone" 
-                };
-                let audio_external_text = if settings.audio_device == "mic3" { 
-                    "External Microphone (3.5mm) ✓" 
-                } else { 
-                    "External Microphone (3.5mm)" 
-                };
-                
-                let audio_default = MenuItemBuilder::with_id("audio_default", audio_default_text).build(app)?;
-                let audio_headset = MenuItemBuilder::with_id("audio_headset", audio_headset_text).build(app)?;
-                let audio_builtin = MenuItemBuilder::with_id("audio_builtin", audio_builtin_text).build(app)?;
-                let audio_external = MenuItemBuilder::with_id("audio_external", audio_external_text).build(app)?;
-                let audio_settings_submenu = SubmenuBuilder::new(app, "Audio Input")
-                    .items(&[&audio_default, &audio_headset, &audio_builtin, &audio_external])
-                    .build()?;
-                
-                // Main Settings submenu items
-                let preferences = MenuItemBuilder::with_id("preferences", "Preferences...").build(app)?;
-                let language_settings = MenuItemBuilder::with_id("language_settings", "Language Settings").build(app)?;
-                let audio_settings = MenuItemBuilder::with_id("audio_settings", "Audio Settings").build(app)?;
-                let settings_submenu = SubmenuBuilder::new(app, "Settings")
-                    .items(&[&preferences, &language_settings, &audio_settings, &spoken_language_submenu, &translation_language_submenu, &audio_settings_submenu])
-                    .build()?;
-                
                 let show_hide = MenuItemBuilder::with_id("show_hide", "Show/Hide TalkToMe").build(app)?;
                 let start_recording = MenuItemBuilder::with_id("start_recording", "Start Recording").build(app)?;
                 let stop_recording = MenuItemBuilder::with_id("stop_recording", "Stop Recording").enabled(false).build(app)?;
-                let recording_submenu = SubmenuBuilder::new(app, "Recording")
-                    .items(&[&start_recording, &stop_recording])
-                    .build()?;
                 
+                let preferences = MenuItemBuilder::with_id("preferences", "Preferences").build(app)?;
+                let language_settings = MenuItemBuilder::with_id("language_settings", "Language Settings").build(app)?;
+                let audio_settings = MenuItemBuilder::with_id("audio_settings", "Audio Settings").build(app)?;
                 let about = MenuItemBuilder::with_id("about", "About TalkToMe").build(app)?;
                 let quit = MenuItemBuilder::with_id("quit", "Quit").build(app)?;
 
                 MenuBuilder::new(app)
                     .items(&[
                         &show_hide,
-                        &recording_submenu,
-                        &settings_submenu,
+                        &start_recording,
+                        &stop_recording,
+                        &preferences,
+                        &language_settings, 
+                        &audio_settings,
                         &about,
                         &quit,
                     ])
@@ -1085,89 +836,6 @@ pub fn run() {
                         }
                         "quit" => {
                             app.exit(0);
-                        }
-                        // Spoken Language events
-                        "spoken_auto" => {
-                            if let Some(window) = app.get_webview_window("main") {
-                                let _ = window.emit("tray-spoken-language-change", "auto");
-                            }
-                        }
-                        "spoken_en" => {
-                            if let Some(window) = app.get_webview_window("main") {
-                                let _ = window.emit("tray-spoken-language-change", "en");
-                            }
-                        }
-                        "spoken_pt" => {
-                            if let Some(window) = app.get_webview_window("main") {
-                                let _ = window.emit("tray-spoken-language-change", "pt");
-                            }
-                        }
-                        "spoken_es" => {
-                            if let Some(window) = app.get_webview_window("main") {
-                                let _ = window.emit("tray-spoken-language-change", "es");
-                            }
-                        }
-                        "spoken_fr" => {
-                            if let Some(window) = app.get_webview_window("main") {
-                                let _ = window.emit("tray-spoken-language-change", "fr");
-                            }
-                        }
-                        "spoken_de" => {
-                            if let Some(window) = app.get_webview_window("main") {
-                                let _ = window.emit("tray-spoken-language-change", "de");
-                            }
-                        }
-                        // Translation Language events
-                        "translation_none" => {
-                            if let Some(window) = app.get_webview_window("main") {
-                                let _ = window.emit("tray-translation-language-change", "none");
-                            }
-                        }
-                        "translation_en" => {
-                            if let Some(window) = app.get_webview_window("main") {
-                                let _ = window.emit("tray-translation-language-change", "en");
-                            }
-                        }
-                        "translation_pt" => {
-                            if let Some(window) = app.get_webview_window("main") {
-                                let _ = window.emit("tray-translation-language-change", "pt");
-                            }
-                        }
-                        "translation_es" => {
-                            if let Some(window) = app.get_webview_window("main") {
-                                let _ = window.emit("tray-translation-language-change", "es");
-                            }
-                        }
-                        "translation_fr" => {
-                            if let Some(window) = app.get_webview_window("main") {
-                                let _ = window.emit("tray-translation-language-change", "fr");
-                            }
-                        }
-                        "translation_de" => {
-                            if let Some(window) = app.get_webview_window("main") {
-                                let _ = window.emit("tray-translation-language-change", "de");
-                            }
-                        }
-                        // Audio Input events
-                        "audio_default" => {
-                            if let Some(window) = app.get_webview_window("main") {
-                                let _ = window.emit("tray-audio-input-change", "default");
-                            }
-                        }
-                        "audio_headset" => {
-                            if let Some(window) = app.get_webview_window("main") {
-                                let _ = window.emit("tray-audio-input-change", "mic1");
-                            }
-                        }
-                        "audio_builtin" => {
-                            if let Some(window) = app.get_webview_window("main") {
-                                let _ = window.emit("tray-audio-input-change", "mic2");
-                            }
-                        }
-                        "audio_external" => {
-                            if let Some(window) = app.get_webview_window("main") {
-                                let _ = window.emit("tray-audio-input-change", "mic3");
-                            }
                         }
                         _ => {}
                     }
