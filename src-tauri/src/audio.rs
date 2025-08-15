@@ -1,7 +1,8 @@
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::{FromSample, Sample};
 use std::sync::{Arc, Mutex};
-use tokio::sync::mpsc;
+use std::sync::mpsc;
+use std::time::{Duration, Instant};
 use crate::debug_logger::DebugLogger;
 
 pub struct AudioCapture {
@@ -52,7 +53,7 @@ impl AudioCapture {
             sample_rate, config.channels(), config.sample_format()));
         
         // Create a channel for sending audio chunks
-        let (tx, rx) = mpsc::channel(50); // Increased buffer size
+        let (tx, rx) = mpsc::channel(); // Synchronous unbounded channel
         DebugLogger::log_info("Audio channel created with buffer size 50");
         
         // Set recording state to true
@@ -126,7 +127,7 @@ impl AudioCapture {
                     static CALLBACK_COUNT: AtomicU32 = AtomicU32::new(0);
                     let count = CALLBACK_COUNT.fetch_add(1, Ordering::Relaxed);
                     if count < 5 {
-                        DebugLogger::log_info(&format!("Audio callback #{}: received {} samples", count + 1, samples.len()));
+                        eprintln!("Audio callback #{}: received {} samples", count + 1, samples.len());
                     }
                     
                     // Add to chunk buffer
@@ -148,19 +149,17 @@ impl AudioCapture {
                     }
                     
                     if should_send && !chunk_to_send.data.is_empty() {
-                        // Send chunk asynchronously
-                        let tx_clone = tx.clone();
-                        DebugLogger::log_info(&format!("Preparing to send audio chunk: {} samples", chunk_to_send.data.len()));
-                        tokio::spawn(async move {
-                            DebugLogger::log_info(&format!("Sending audio chunk: {} samples", chunk_to_send.data.len()));
-                            if let Err(e) = tx_clone.send(chunk_to_send).await {
+                        // Send chunk synchronously using try_send to avoid blocking the audio thread
+                        eprintln!("Preparing to send audio chunk: {} samples", chunk_to_send.data.len());
+                        match tx.send(chunk_to_send) {
+                            Ok(_) => {
+                                eprintln!("Audio chunk sent successfully");
+                            },
+                            Err(e) => {
                                 let error_msg = format!("Failed to send audio chunk: {}", e);
                                 eprintln!("{}", error_msg);
-                                DebugLogger::log_pipeline_error("audio_send", &error_msg);
-                            } else {
-                                DebugLogger::log_info("Audio chunk sent successfully");
                             }
-                        });
+                        }
                     }
                 }
             },

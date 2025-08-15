@@ -244,7 +244,7 @@ async fn start_recording(
     
     // Start capturing audio
     DebugLogger::log_info("Starting audio capture");
-    let mut audio_rx = audio_capture.start_capture().map_err(|e| {
+    let audio_rx = audio_capture.start_capture().map_err(|e| {
         let error_msg = format!("Failed to start audio capture: {}", e);
         DebugLogger::log_pipeline_error("audio_capture", &error_msg);
         error_msg
@@ -327,7 +327,7 @@ async fn start_recording(
         DebugLogger::log_info("Waiting for first audio chunk...");
         
         // Process audio chunks
-        while let Some(audio_chunk) = audio_rx.recv().await {
+        while let Ok(audio_chunk) = audio_rx.recv() {
             DebugLogger::log_info("=== NEW AUDIO CHUNK RECEIVED ===");
             
             // Check if recording has been stopped
