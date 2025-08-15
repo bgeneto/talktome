@@ -1,5 +1,6 @@
 use reqwest;
 use serde_json::Value;
+use std::time::Duration;
 
 pub struct STTService {
     client: reqwest::Client,
@@ -9,46 +10,104 @@ pub struct STTService {
 
 impl STTService {
     pub fn new(api_endpoint: String, api_key: String) -> Self {
+        let client = reqwest::Client::builder()
+            .timeout(Duration::from_secs(30))
+            .build()
+            .unwrap_or_default();
+
         Self {
-            client: reqwest::Client::new(),
+            client,
             api_endpoint,
             api_key,
         }
     }
 
+    /// Transcribe audio chunk with enhanced error handling
     pub async fn transcribe_chunk(&self, audio_data: Vec<f32>, sample_rate: u32) -> Result<String, String> {
-        // Convert f32 samples to i16 for WAV encoding
-        let audio_bytes = self.encode_wav(&audio_data, sample_rate).map_err(|e| e.to_string())?;
-        
-        // Create multipart form data
-        let form = reqwest::multipart::Form::new()
-            .text("model", "whisper-1")
-            .text("response_format", "json")
-            .part("file", reqwest::multipart::Part::bytes(audio_bytes)
-                .file_name("audio.wav")
-                .mime_str("audio/wav").map_err(|e| e.to_string())?);
-
-        // Send request to Whisper API
-        let url = format!("{}/audio/transcriptions", self.api_endpoint);
-        let response = self.client
-            .post(&url)
-            .header("Authorization", format!("Bearer {}", self.api_key))
-            .multipart(form)
-            .send()
-            .await
-            .map_err(|e| e.to_string())?;
-
-        if response.status().is_success() {
-            let json: Value = response.json().await.map_err(|e| e.to_string())?;
-            if let Some(text) = json["text"].as_str() {
-                Ok(text.to_string())
-            } else {
-                Err("No text in response".to_string())
-            }
-        } else {
-            let error_text = response.text().await.map_err(|e| e.to_string())?;
-            Err(format!("API error: {}", error_text))
+        if audio_data.is_empty() {
+            return Err("Empty audio data".to_string());
         }
+
+        // Check for audio quality - skip if too quiet
+        let max_amplitude = audio_data.iter().map(|&x| x.abs()).fold(0.0, f32::max);
+        if max_amplitude < 0.01 {
+            return Ok(String::new()); // Return empty string for silent audio
+        }
+
+        // Convert f32 samples to i16 for WAV encoding
+        let audio_bytes = self.encode_wav(&audio_data, sample_rate)
+            .map_err(|e| format!("Audio encoding error: {}", e))?;
+
+        // Skip very small audio files (less than 1 second)
+        if audio_bytes.len() < (sample_rate * 2) as usize {
+            return Ok(String::new());
+        }
+
+        self.send_transcription_request(audio_bytes).await
+    }
+
+    async fn send_transcription_request(&self, audio_bytes: Vec<u8>) -> Result<String, String> {
+        // Send request to Whisper API with retries
+        let url = format!("{}/audio/transcriptions", self.api_endpoint);
+        
+        for attempt in 1..=3 {
+            // Create multipart form data fresh for each attempt
+            let form = reqwest::multipart::Form::new()
+                .text("model", "whisper-1")
+                .text("response_format", "json")
+                .text("language", "en") // Optional: specify language if known
+                .part("file", reqwest::multipart::Part::bytes(audio_bytes.clone())
+                    .file_name("audio.wav")
+                    .mime_str("audio/wav")
+                    .map_err(|e| format!("Multipart error: {}", e))?);
+
+            let response = self.client
+                .post(&url)
+                .header("Authorization", format!("Bearer {}", self.api_key))
+                .multipart(form)
+                .send()
+                .await;
+
+            match response {
+                Ok(resp) => {
+                    if resp.status().is_success() {
+                        let json: Value = resp.json().await
+                            .map_err(|e| format!("JSON parsing error: {}", e))?;
+                        
+                        if let Some(text) = json["text"].as_str() {
+                            return Ok(text.trim().to_string());
+                        } else {
+                            return Err("No text in API response".to_string());
+                        }
+                    } else {
+                        let status = resp.status();
+                        let error_text = resp.text().await.unwrap_or_default();
+                        
+                        // Don't retry on authentication errors
+                        if status.as_u16() == 401 || status.as_u16() == 403 {
+                            return Err(format!("Authentication error: {}", error_text));
+                        }
+                        
+                        if attempt == 3 {
+                            return Err(format!("API error after {} attempts: {} - {}", attempt, status, error_text));
+                        }
+                        
+                        // Wait before retry
+                        tokio::time::sleep(Duration::from_millis(1000 * attempt)).await;
+                    }
+                },
+                Err(e) => {
+                    if attempt == 3 {
+                        return Err(format!("Network error after {} attempts: {}", attempt, e));
+                    }
+                    
+                    // Wait before retry
+                    tokio::time::sleep(Duration::from_millis(1000 * attempt)).await;
+                }
+            }
+        }
+        
+        Err("Max retries exceeded".to_string())
     }
 
     fn encode_wav(&self, samples: &[f32], sample_rate: u32) -> Result<Vec<u8>, String> {

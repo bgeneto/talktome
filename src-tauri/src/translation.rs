@@ -16,17 +16,40 @@ impl TranslationService {
         }
     }
 
-    pub async fn translate_text(&self, text: &str, source_lang: &str, target_lang: &str) -> Result<String, String> {
-        // Create the prompt for translation
-        let prompt = if source_lang == "auto" {
-            format!("Translate the following text to {}:\n\n{}", 
-                    self.get_language_name(target_lang), text)
-        } else {
-            format!("Translate the following text from {} to {}:\n\n{}", 
-                    self.get_language_name(source_lang), 
+    /// Process text with optional translation - always corrects grammar and punctuation
+    pub async fn process_text(&self, text: &str, source_lang: &str, target_lang: &str, translate_enabled: bool) -> Result<String, String> {
+        let prompt = if translate_enabled && target_lang != "none" && target_lang != source_lang {
+            // Translation + correction mode
+            if source_lang == "auto" {
+                format!(
+                    "Please correct any grammar, punctuation, and spelling errors in the following text, then translate it to {}. \
+                    Provide only the corrected and translated text without any additional commentary:\n\n{}", 
                     self.get_language_name(target_lang), 
-                    text)
+                    text
+                )
+            } else {
+                format!(
+                    "Please correct any grammar, punctuation, and spelling errors in the following {} text, then translate it to {}. \
+                    Provide only the corrected and translated text without any additional commentary:\n\n{}", 
+                    self.get_language_name(source_lang),
+                    self.get_language_name(target_lang), 
+                    text
+                )
+            }
+        } else {
+            // Correction only mode
+            format!(
+                "Please correct any grammar, punctuation, and spelling errors in the following text. \
+                Keep the same language and meaning, just fix any errors. \
+                Provide only the corrected text without any additional commentary:\n\n{}", 
+                text
+            )
         };
+
+        self.send_chat_request(&prompt).await
+    }
+
+    async fn send_chat_request(&self, prompt: &str) -> Result<String, String> {
 
         // Create the request body
         let body = json!({

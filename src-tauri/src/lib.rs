@@ -16,6 +16,8 @@ mod translation;
 use translation::TranslationService;
 mod text_insertion;
 use text_insertion::TextInsertionService;
+mod system_audio;
+use system_audio::SystemAudioControl;
 
 // Global state to track registered hotkeys and active recording
 type HotkeyRegistry = Mutex<HashMap<String, String>>;
@@ -199,6 +201,9 @@ async fn start_recording(app: AppHandle, recording_state: State<'_, RecordingSta
     // Load settings
     let settings = AppSettings::load(&app).map_err(|e| e.to_string())?;
     
+    // Get API key
+    let api_key = settings.get_api_key(&app).map_err(|e| e.to_string())?;
+    
     // Create audio capture instance
     let mut audio_capture = AudioCapture::new();
     
@@ -211,21 +216,42 @@ async fn start_recording(app: AppHandle, recording_state: State<'_, RecordingSta
         *state = true;
     }
     
-    // Create services
-    let stt_service = STTService::new(settings.api_endpoint.clone(), settings.api_key.clone());
-    let translation_service = if settings.translation_language != "none" {
-        Some(TranslationService::new(settings.api_endpoint.clone(), settings.api_key.clone()))
+    // Create services with API key
+    let stt_service = STTService::new(settings.api_endpoint.clone(), api_key.clone());
+    let translation_service = if settings.translation_enabled && settings.translation_language != "none" {
+        Some(TranslationService::new(settings.api_endpoint.clone(), api_key))
     } else {
-        None
+        // Always create translation service for text correction
+        Some(TranslationService::new(settings.api_endpoint.clone(), api_key))
     };
     let text_insertion_service = TextInsertionService::new();
     
-    // Clone app handle for the processing task
+    // Clone values for the async task
     let app_clone = app.clone();
     let recording_state_clone = recording_state.inner().clone();
+    let auto_mute = settings.auto_mute;
     
     // Spawn task to process audio chunks
     tokio::spawn(async move {
+        // Create system audio control inside the task for auto-mute if enabled
+        let audio_control = if auto_mute {
+            match SystemAudioControl::new() {
+                Ok(control) => {
+                    // Mute system audio
+                    if let Err(e) = control.mute_system_audio() {
+                        eprintln!("Failed to mute system audio: {}", e);
+                    }
+                    Some(control)
+                },
+                Err(e) => {
+                    eprintln!("Failed to initialize system audio control: {}", e);
+                    None
+                }
+            }
+        } else {
+            None
+        };
+        
         let stt_service = stt_service;
         let translation_service = translation_service;
         let text_insertion_service = text_insertion_service;
@@ -242,31 +268,33 @@ async fn start_recording(app: AppHandle, recording_state: State<'_, RecordingSta
                 }
             }
             
-            // Skip empty chunks
-            if audio_chunk.is_empty() {
+            // Skip empty or silent chunks
+            if audio_chunk.is_empty() || !audio_chunk.has_audio_activity() {
                 continue;
             }
             
+            // Emit status to frontend
+            let _ = app.emit("processing-audio", true);
+            
             // Transcribe audio chunk
-            match stt_service.transcribe_chunk(audio_chunk, 48000).await {
+            match stt_service.transcribe_chunk(audio_chunk.data, audio_chunk.sample_rate).await {
                 Ok(transcribed_text) => {
                     if !transcribed_text.trim().is_empty() {
-                        // Translate text if needed
+                        // Always process text through translation service for correction/translation
                         let final_text = if let Some(ref translation_service) = translation_service {
-                            if settings.translation_language != "none" {
-                                match translation_service.translate_text(
-                                    &transcribed_text,
-                                    &settings.spoken_language,
-                                    &settings.translation_language
-                                ).await {
-                                    Ok(translated_text) => translated_text,
-                                    Err(e) => {
-                                        eprintln!("Translation error: {}", e);
-                                        transcribed_text.clone() // Fallback to original text
-                                    }
+                            match translation_service.process_text(
+                                &transcribed_text,
+                                &settings.spoken_language,
+                                &settings.translation_language,
+                                settings.translation_enabled
+                            ).await {
+                                Ok(processed_text) => processed_text,
+                                Err(e) => {
+                                    eprintln!("Text processing error: {}", e);
+                                    // Emit error to frontend
+                                    let _ = app.emit("processing-error", format!("Text processing error: {}", e));
+                                    transcribed_text.clone() // Fallback to original text
                                 }
-                            } else {
-                                transcribed_text.clone()
                             }
                         } else {
                             transcribed_text.clone()
@@ -275,14 +303,28 @@ async fn start_recording(app: AppHandle, recording_state: State<'_, RecordingSta
                         // Insert text into focused application
                         if let Err(e) = text_insertion_service.insert_text(&final_text) {
                             eprintln!("Text insertion error: {}", e);
+                            let _ = app.emit("processing-error", format!("Text insertion error: {}", e));
                         }
                         
-                        // Emit event to frontend with transcribed text
+                        // Emit success event to frontend with transcribed text
                         let _ = app.emit("transcribed-text", &final_text);
+                        let _ = app.emit("processing-audio", false);
                     }
                 }
                 Err(e) => {
                     eprintln!("Transcription error: {}", e);
+                    let _ = app.emit("processing-error", format!("Transcription error: {}", e));
+                    let _ = app.emit("processing-audio", false);
+                }
+            }
+        }
+        
+        // Clean up when recording stops
+        // Unmute system audio if it was muted
+        if let Some(ref audio_control) = audio_control {
+            if audio_control.is_muted() {
+                if let Err(e) = audio_control.unmute_system_audio() {
+                    eprintln!("Failed to unmute system audio during cleanup: {}", e);
                 }
             }
         }
@@ -292,6 +334,8 @@ async fn start_recording(app: AppHandle, recording_state: State<'_, RecordingSta
             let mut state = recording_state_clone.lock().unwrap();
             *state = false;
         }
+        
+        let _ = app.emit("recording-stopped", ());
     });
     
     Ok(())
@@ -485,6 +529,106 @@ async fn update_audio_device(app: AppHandle, device: String) -> Result<(), Strin
     Ok(())
 }
 
+#[tauri::command]
+async fn store_api_key(app: AppHandle, api_key: String) -> Result<(), String> {
+    let settings = AppSettings::load(&app).map_err(|e| e.to_string())?;
+    settings.store_api_key(&app, api_key)?;
+    Ok(())
+}
+
+#[tauri::command]
+async fn get_api_key(app: AppHandle) -> Result<String, String> {
+    let settings = AppSettings::load(&app).map_err(|e| e.to_string())?;
+    settings.get_api_key(&app)
+}
+
+#[tauri::command]
+async fn has_api_key(app: AppHandle) -> Result<bool, String> {
+    let settings = AppSettings::load(&app).map_err(|e| e.to_string())?;
+    Ok(settings.has_api_key(&app))
+}
+
+#[tauri::command]
+async fn update_api_endpoint(app: AppHandle, endpoint: String) -> Result<(), String> {
+    let mut settings = AppSettings::load(&app).map_err(|e| e.to_string())?;
+    settings.api_endpoint = endpoint;
+    settings.save(&app)?;
+    Ok(())
+}
+
+#[tauri::command]
+async fn toggle_translation(app: AppHandle, enabled: bool) -> Result<(), String> {
+    let mut settings = AppSettings::load(&app).map_err(|e| e.to_string())?;
+    settings.translation_enabled = enabled;
+    settings.save(&app)?;
+    
+    // Update tray menu
+    update_tray_menu(&app, &settings).map_err(|e| e.to_string())?;
+    
+    Ok(())
+}
+
+#[tauri::command]
+async fn update_auto_mute(app: AppHandle, enabled: bool) -> Result<(), String> {
+    let mut settings = AppSettings::load(&app).map_err(|e| e.to_string())?;
+    settings.auto_mute = enabled;
+    settings.save(&app)?;
+    Ok(())
+}
+
+#[tauri::command]
+async fn get_available_audio_devices() -> Result<Vec<String>, String> {
+    use cpal::traits::{DeviceTrait, HostTrait};
+    
+    let host = cpal::default_host();
+    let mut devices = Vec::new();
+    
+    // Add default device
+    devices.push("default".to_string());
+    
+    // Add available input devices
+    match host.input_devices() {
+        Ok(input_devices) => {
+            for device in input_devices {
+                if let Ok(name) = device.name() {
+                    devices.push(name);
+                }
+            }
+        }
+        Err(e) => {
+            eprintln!("Failed to enumerate input devices: {}", e);
+        }
+    }
+    
+    Ok(devices)
+}
+
+#[tauri::command]
+async fn test_audio_capture() -> Result<String, String> {
+    use cpal::traits::{DeviceTrait, HostTrait};
+    
+    let host = cpal::default_host();
+    let device = host.default_input_device()
+        .ok_or("No input device available")?;
+    
+    let config = device.default_input_config()
+        .map_err(|e| format!("Failed to get input config: {}", e))?;
+    
+    Ok(format!(
+        "Audio device: {}\nSample rate: {}\nChannels: {}\nFormat: {:?}",
+        device.name().unwrap_or_else(|_| "Unknown".to_string()),
+        config.sample_rate().0,
+        config.channels(),
+        config.sample_format()
+    ))
+}
+
+#[tauri::command]
+async fn get_recording_status(recording_state: State<'_, RecordingState>) -> Result<bool, String> {
+    let state = recording_state.inner().lock().map_err(|e| e.to_string())?;
+    Ok(*state)
+}
+
 fn update_tray_menu(app: &AppHandle, settings: &AppSettings) -> Result<(), Box<dyn std::error::Error>> {
     // Get existing tray icon
     let tray = app.tray_by_id("main-tray").ok_or("Tray icon not found")?;
@@ -642,7 +786,28 @@ pub fn run() {
         .plugin(tauri_plugin_global_shortcut::Builder::new().build())
         .manage(Mutex::<HashMap<String, String>>::new(HashMap::new()))
         .manage(Arc::new(Mutex::new(false)) as RecordingState)
-        .invoke_handler(tauri::generate_handler![greet, start_recording, stop_recording, toggle_window, quit_app, update_spoken_language, update_translation_language, update_audio_device, register_hotkeys, test_stt_api, validate_settings])
+        .invoke_handler(tauri::generate_handler![
+            greet, 
+            start_recording, 
+            stop_recording, 
+            toggle_window, 
+            quit_app, 
+            update_spoken_language, 
+            update_translation_language, 
+            update_audio_device, 
+            register_hotkeys, 
+            test_stt_api, 
+            validate_settings,
+            store_api_key,
+            get_api_key,
+            has_api_key,
+            update_api_endpoint,
+            toggle_translation,
+            update_auto_mute,
+            get_available_audio_devices,
+            test_audio_capture,
+            get_recording_status
+        ])
         .setup(|app| {
             // Load current settings
             let settings = AppSettings::load(&app.handle()).unwrap_or_default();
