@@ -121,6 +121,14 @@ impl AudioCapture {
                         .map(|chunk| chunk[0].to_sample())
                         .collect();
                     
+                    // Log the first few audio callbacks to verify we're receiving data
+                    use std::sync::atomic::{AtomicU32, Ordering};
+                    static CALLBACK_COUNT: AtomicU32 = AtomicU32::new(0);
+                    let count = CALLBACK_COUNT.fetch_add(1, Ordering::Relaxed);
+                    if count < 5 {
+                        DebugLogger::log_info(&format!("Audio callback #{}: received {} samples", count + 1, samples.len()));
+                    }
+                    
                     // Add to chunk buffer
                     let mut should_send = false;
                     let mut chunk_to_send = AudioChunk {
@@ -142,6 +150,7 @@ impl AudioCapture {
                     if should_send && !chunk_to_send.data.is_empty() {
                         // Send chunk asynchronously
                         let tx_clone = tx.clone();
+                        DebugLogger::log_info(&format!("Preparing to send audio chunk: {} samples", chunk_to_send.data.len()));
                         tokio::spawn(async move {
                             DebugLogger::log_info(&format!("Sending audio chunk: {} samples", chunk_to_send.data.len()));
                             if let Err(e) = tx_clone.send(chunk_to_send).await {

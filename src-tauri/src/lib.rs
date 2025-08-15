@@ -282,7 +282,7 @@ async fn start_recording(
     let recording_state_clone = recording_state.inner().clone();
     let auto_mute = settings.auto_mute;
     
-    // Spawn task to process audio chunks
+    // Spawn task to process audio chunks  
     tokio::spawn(async move {
         // Create system audio control inside the task for auto-mute if enabled
         DebugLogger::log_info(&format!("Auto-mute setting: {}", auto_mute));
@@ -322,6 +322,9 @@ async fn start_recording(
         DebugLogger::log_info("Starting audio processing pipeline");
         DebugLogger::log_info(&format!("Pipeline settings: translation_enabled={}, spoken_lang={}, target_lang={}", 
             settings.translation_enabled, settings.spoken_language, settings.translation_language));
+        
+        DebugLogger::log_info("About to enter audio chunk processing loop");
+        DebugLogger::log_info("Waiting for first audio chunk...");
         
         // Process audio chunks
         while let Some(audio_chunk) = audio_rx.recv().await {
@@ -423,7 +426,11 @@ async fn start_recording(
             }
         }
         
-        // Clean up when recording stops
+        DebugLogger::log_info("Audio receiver channel closed - no more audio chunks");
+        DebugLogger::log_info("This could indicate:");
+        DebugLogger::log_info("1. Audio stream ended unexpectedly");
+        DebugLogger::log_info("2. Audio capture was stopped externally");  
+        DebugLogger::log_info("3. Audio channel sender was dropped");
         DebugLogger::log_info("=== PIPELINE CLEANUP STARTING ===");
         // Unmute system audio if it was muted
         if let Some(ref audio_control) = audio_control {
@@ -454,6 +461,10 @@ async fn start_recording(
         let _ = app.emit("recording-stopped", ());
         DebugLogger::log_info("=== PIPELINE CLEANUP COMPLETE ===");
     });
+    
+    // IMPORTANT: Keep audio_capture alive by preventing it from being dropped
+    // This is a temporary solution - we'll need a proper cleanup mechanism
+    std::mem::forget(audio_capture);
     
     Ok(())
 }
@@ -615,8 +626,10 @@ fn quit_app(app: tauri::AppHandle) -> Result<(), String> {
 
 #[tauri::command]
 async fn store_api_key(app: AppHandle, api_key: String) -> Result<(), String> {
+    DebugLogger::log_info(&format!("store_api_key called with key length: {}", api_key.len()));
     let settings = AppSettings::default(); // Only need the methods, not loaded settings
     settings.store_api_key(&app, api_key)?;
+    DebugLogger::log_info("API key stored successfully in backend");
     Ok(())
 }
 
@@ -767,10 +780,11 @@ async fn save_settings_from_frontend(
     hands_free_hotkey: String
 ) -> Result<(), String> {
     // Log the settings being saved (without logging the API key for security)
-    DebugLogger::log_info(&format!("SETTINGS_SAVE: spoken_language={}, translation_language={}, audio_device={}, theme={}, api_endpoint={}, api_key_length={}, auto_mute={}, translation_enabled={}, debug_logging={}, push_to_talk={}, hands_free={}", 
-        spoken_language, translation_language, audio_device, theme, api_endpoint, api_key.len(), auto_mute, translation_enabled, debug_logging, push_to_talk_hotkey, hands_free_hotkey));
+    DebugLogger::log_info(&format!("SETTINGS_SAVE: spoken_language={}, translation_language={}, audio_device={}, theme={}, api_endpoint={}, api_key_provided={}, auto_mute={}, translation_enabled={}, debug_logging={}, push_to_talk={}, hands_free={}", 
+        spoken_language, translation_language, audio_device, theme, api_endpoint, !api_key.is_empty(), auto_mute, translation_enabled, debug_logging, push_to_talk_hotkey, hands_free_hotkey));
 
-    // Store API key securely if provided
+    // Store API key securely if provided and not empty
+    // (Note: we now send empty string for security, so API key is stored separately via store_api_key command)
     if !api_key.is_empty() {
         let settings = AppSettings::default();
         settings.store_api_key(&app, api_key)?;

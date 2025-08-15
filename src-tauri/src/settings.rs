@@ -15,7 +15,9 @@ pub struct AppSettings {
     pub auto_mute: bool,
     pub translation_enabled: bool,
     pub debug_logging: bool,
-    // Note: api_key is handled separately via Stronghold for security
+    // SECURITY: API key is NEVER stored in this struct or localStorage
+    // It's handled separately via secure file storage (backend only)
+    // Frontend stores it only in memory during runtime
 }
 
 #[derive(Serialize, Deserialize, Clone)]

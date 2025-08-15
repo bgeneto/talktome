@@ -49,9 +49,16 @@ function createSettingsStore() {
         ...defaultSettings,
         ...parsed,
         hotkeys: mergedHotkeys,
+        // SECURITY: Never load API key from localStorage - always empty it
+        apiKey: "",
       } as Settings;
-      // Persist migration if we dropped/changed keys
-      localStorage.setItem('talktome-settings', JSON.stringify(initialSettings));
+      
+      // SECURITY: Remove API key from localStorage if it exists (migration from insecure storage)
+      if (parsed.apiKey) {
+        const cleanedSettings = { ...parsed, hotkeys: mergedHotkeys, apiKey: "" };
+        localStorage.setItem('talktome-settings', JSON.stringify(cleanedSettings));
+        console.warn('Removed API key from localStorage for security. API key should only be stored in secure backend storage.');
+      }
     } else {
       initialSettings = defaultSettings;
     }
@@ -92,13 +99,14 @@ function createSettingsStore() {
     try {
       const currentSettings = get(store);
       
+      // SECURITY: Don't send API key in this sync - it's stored separately via store_api_key
       await invoke('save_settings_from_frontend', {
         spoken_language: currentSettings.spokenLanguage,
         translation_language: currentSettings.translationLanguage,
         audio_device: currentSettings.audioDevice,
         theme: currentSettings.theme,
         api_endpoint: currentSettings.apiEndpoint,
-        api_key: currentSettings.apiKey,
+        api_key: "", // Always send empty - API key is stored separately for security
         auto_mute: currentSettings.autoMute,
         translation_enabled: currentSettings.translationLanguage !== 'none',
         debug_logging: currentSettings.debugLogging,
@@ -117,7 +125,9 @@ function createSettingsStore() {
     setSpokenLanguage: (language: string) => {
       update(settings => {
         const newSettings = { ...settings, spokenLanguage: language };
-        localStorage.setItem('talktome-settings', JSON.stringify(newSettings));
+        // SECURITY: Never store API key in localStorage
+        const settingsForLocalStorage = { ...newSettings, apiKey: "" };
+        localStorage.setItem('talktome-settings', JSON.stringify(settingsForLocalStorage));
         // Sync to backend
         setTimeout(() => {
           syncToBackend();
@@ -128,7 +138,9 @@ function createSettingsStore() {
     setTranslationLanguage: (language: string) => {
       update(settings => {
         const newSettings = { ...settings, translationLanguage: language };
-        localStorage.setItem('talktome-settings', JSON.stringify(newSettings));
+        // SECURITY: Never store API key in localStorage
+        const settingsForLocalStorage = { ...newSettings, apiKey: "" };
+        localStorage.setItem('talktome-settings', JSON.stringify(settingsForLocalStorage));
         // Sync to backend
         setTimeout(() => {
           syncToBackend();
@@ -139,7 +151,9 @@ function createSettingsStore() {
     setAudioDevice: (device: string) => {
       update(settings => {
         const newSettings = { ...settings, audioDevice: device };
-        localStorage.setItem('talktome-settings', JSON.stringify(newSettings));
+        // SECURITY: Never store API key in localStorage
+        const settingsForLocalStorage = { ...newSettings, apiKey: "" };
+        localStorage.setItem('talktome-settings', JSON.stringify(settingsForLocalStorage));
         // Sync to backend
         setTimeout(() => {
           syncToBackend();
@@ -150,14 +164,18 @@ function createSettingsStore() {
     setQuickAccessLanguages: (languages: string[]) => {
       update(settings => {
         const newSettings = { ...settings, quickAccessLanguages: languages };
-        localStorage.setItem('talktome-settings', JSON.stringify(newSettings));
+        // SECURITY: Never store API key in localStorage
+        const settingsForLocalStorage = { ...newSettings, apiKey: "" };
+        localStorage.setItem('talktome-settings', JSON.stringify(settingsForLocalStorage));
         return newSettings;
       });
     },
     setTheme: (theme: string) => {
       update(settings => {
         const newSettings = { ...settings, theme };
-        localStorage.setItem('talktome-settings', JSON.stringify(newSettings));
+        // SECURITY: Never store API key in localStorage
+        const settingsForLocalStorage = { ...newSettings, apiKey: "" };
+        localStorage.setItem('talktome-settings', JSON.stringify(settingsForLocalStorage));
         // Sync to backend for consistency
         setTimeout(() => {
           syncToBackend();
@@ -168,7 +186,9 @@ function createSettingsStore() {
     setAutoMute: (enabled: boolean) => {
       update(settings => {
         const newSettings = { ...settings, autoMute: enabled };
-        localStorage.setItem('talktome-settings', JSON.stringify(newSettings));
+        // SECURITY: Never store API key in localStorage
+        const settingsForLocalStorage = { ...newSettings, apiKey: "" };
+        localStorage.setItem('talktome-settings', JSON.stringify(settingsForLocalStorage));
         // Sync to backend
         setTimeout(() => {
           syncToBackend();
@@ -179,7 +199,9 @@ function createSettingsStore() {
     setDebugLogging: (enabled: boolean) => {
       update(settings => {
         const newSettings = { ...settings, debugLogging: enabled };
-        localStorage.setItem('talktome-settings', JSON.stringify(newSettings));
+        // SECURITY: Never store API key in localStorage
+        const settingsForLocalStorage = { ...newSettings, apiKey: "" };
+        localStorage.setItem('talktome-settings', JSON.stringify(settingsForLocalStorage));
         // Sync to backend
         setTimeout(() => {
           syncToBackend();
@@ -190,7 +212,9 @@ function createSettingsStore() {
     setApiEndpoint: (endpoint: string) => {
       update(settings => {
         const newSettings = { ...settings, apiEndpoint: endpoint };
-        localStorage.setItem('talktome-settings', JSON.stringify(newSettings));
+        // SECURITY: Never store API key in localStorage
+        const settingsForLocalStorage = { ...newSettings, apiKey: "" };
+        localStorage.setItem('talktome-settings', JSON.stringify(settingsForLocalStorage));
         // Sync to backend for consistency
         setTimeout(() => {
           syncToBackend();
@@ -200,9 +224,23 @@ function createSettingsStore() {
     },
     setApiKey: (key: string) => {
       update(settings => {
+        // SECURITY: Store API key securely in backend only, never in localStorage
         const newSettings = { ...settings, apiKey: key };
-        localStorage.setItem('talktome-settings', JSON.stringify(newSettings));
-        // Sync to backend for consistency
+        
+        // Save all OTHER settings to localStorage (excluding API key)
+        const settingsForLocalStorage = { ...newSettings, apiKey: "" }; // Set to empty instead of delete
+        localStorage.setItem('talktome-settings', JSON.stringify(settingsForLocalStorage));
+        
+        // Store API key securely in backend
+        invoke('store_api_key', { api_key: key })
+          .then(() => {
+            console.log('API key stored successfully in backend');
+          })
+          .catch(err => {
+            console.error('Failed to store API key securely:', err);
+          });
+        
+        // Sync other settings to backend for consistency
         setTimeout(() => {
           syncToBackend();
         }, 0);
@@ -212,7 +250,9 @@ function createSettingsStore() {
   updateHotkeys: async (hotkeys: { pushToTalk: string; handsFree: string }) => {
       update(settings => {
         const newSettings = { ...settings, hotkeys };
-        localStorage.setItem('talktome-settings', JSON.stringify(newSettings));
+        // SECURITY: Never store API key in localStorage
+        const settingsForLocalStorage = { ...newSettings, apiKey: "" };
+        localStorage.setItem('talktome-settings', JSON.stringify(settingsForLocalStorage));
         // Register hotkeys with backend
         invoke('register_hotkeys', { hotkeys }).catch(err => {
           console.error('Failed to register hotkeys:', err);
