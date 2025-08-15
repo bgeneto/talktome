@@ -6,14 +6,16 @@ pub struct TranslationService {
     client: reqwest::Client,
     api_endpoint: String,
     api_key: String,
+    model: String,
 }
 
 impl TranslationService {
-    pub fn new(api_endpoint: String, api_key: String) -> Self {
+    pub fn new(api_endpoint: String, api_key: String, model: String) -> Self {
         Self {
             client: reqwest::Client::new(),
             api_endpoint,
             api_key,
+            model,
         }
     }
 
@@ -64,7 +66,7 @@ impl TranslationService {
         
         // Create the request body
         let body = json!({
-            "model": "gpt-3.5-turbo",
+            "model": self.model,
             "messages": [
                 {
                     "role": "user",

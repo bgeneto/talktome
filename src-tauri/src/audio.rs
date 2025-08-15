@@ -182,6 +182,7 @@ impl VoiceActivityDetector {
     }
     
     /// Force completion of current chunk (useful when stopping recording)
+    #[allow(dead_code)]
     pub fn flush(&mut self) -> Option<AudioChunk> {
         if self.current_chunk.is_empty() {
             return None;
@@ -211,6 +212,7 @@ impl VoiceActivityDetector {
 pub struct AudioChunk {
     pub data: Vec<f32>,
     pub sample_rate: u32,
+    #[allow(dead_code)]
     pub timestamp: u64,
     pub duration_ms: u64,
     pub chunk_type: ChunkType,
@@ -220,6 +222,7 @@ pub struct AudioChunk {
 pub enum ChunkType {
     SpeechChunk,    // Contains speech activity
     SilenceChunk,   // Contains only silence
+    #[allow(dead_code)]
     Mixed,          // Contains both speech and silence
 }
 
@@ -261,6 +264,7 @@ impl AudioCapture {
         }
     }
 
+    #[allow(dead_code)]
     pub fn stop_recording(&mut self) -> Result<(), Box<dyn std::error::Error>> {
         // Set recording flag to false
         *self.is_recording.lock().unwrap() = false;
@@ -395,9 +399,11 @@ impl AudioCapture {
                                 Ok(_) => {
                                     eprintln!("VAD chunk sent successfully");
                                 },
-                                Err(e) => {
-                                    let error_msg = format!("Failed to send VAD chunk: {}", e);
-                                    eprintln!("{}", error_msg);
+                                Err(_) => {
+                                    // Channel is closed, stop recording to prevent infinite error loop
+                                    eprintln!("Channel closed, stopping audio recording");
+                                    *is_recording.lock().unwrap() = false;
+                                    return;
                                 }
                             }
                         }

@@ -6,15 +6,19 @@
   let currentSettings = {
     apiEndpoint: 'https://api.openai.com/v1',
     apiKey: '',
-    sttModel: 'whisper-large-v3'
+    sttModel: 'whisper-large-v3',
+    translationModel: 'gpt-3.5-turbo'
   };
 
   let saveSuccess = false;
   let isSaving = false;
   let isTestingApi = false;
   let isLoadingModels = false;
+  let isLoadingTranslationModels = false;
   let availableModels: string[] = [];
+  let availableTranslationModels: string[] = ['gpt-3.5-turbo', 'gpt-4', 'gpt-4-turbo', 'gpt-4o', 'gpt-4o-mini'];
   let modelsError: string | null = null;
+  let translationModelsError: string | null = null;
   let apiTestResult: { success: boolean; message: string; details?: string } | null = null;
   let saveError: string | null = null;
 
@@ -24,9 +28,22 @@
       currentSettings = {
         apiEndpoint: s.apiEndpoint || 'https://api.openai.com/v1',
         apiKey: s.apiKey || '',
-        sttModel: s.sttModel || 'whisper-large-v3'
+        sttModel: s.sttModel || 'whisper-large-v3',
+        translationModel: s.translationModel || 'gpt-3.5-turbo'
       };
+      console.log('Settings updated:', { 
+        translationModel: currentSettings.translationModel,
+        availableTranslationModels: availableTranslationModels.length 
+      });
     });
+    
+    // Auto-load models if API credentials are available
+    setTimeout(() => {
+      if (currentSettings.apiEndpoint.trim() && currentSettings.apiKey.trim()) {
+        loadAvailableModels();
+        loadAvailableTranslationModels();
+      }
+    }, 100);
     
     return () => unsubscribe();
   });
@@ -69,7 +86,44 @@
     }
   }
 
+  async function loadAvailableTranslationModels() {
+    if (!currentSettings.apiEndpoint.trim() || !currentSettings.apiKey.trim()) {
+      translationModelsError = 'API endpoint and key are required to fetch translation models';
+      return;
+    }
+    
+    isLoadingTranslationModels = true;
+    translationModelsError = null;
+    
+    try {
+      const result = await settings.fetchAvailableTranslationModels(
+        currentSettings.apiEndpoint.trim(),
+        currentSettings.apiKey.trim()
+      );
+      
+      if (result.success && result.models.length > 0) {
+        availableTranslationModels = result.models;
+        translationModelsError = null;
+        
+        // If current model is not in the list, keep it anyway (user might want to use it)
+        if (!availableTranslationModels.includes(currentSettings.translationModel)) {
+          availableTranslationModels.unshift(currentSettings.translationModel);
+        }
+      } else {
+        translationModelsError = result.message || 'Failed to fetch translation models';
+        // Keep current list of default models
+      }
+    } catch (error) {
+      console.error('Error loading translation models:', error);
+      translationModelsError = 'Failed to load translation models. Using default options.';
+      // Keep current list of default models
+    } finally {
+      isLoadingTranslationModels = false;
+    }
+  }
+
   function persistSettings(updated: Partial<typeof currentSettings>) {
+    console.log('persistSettings called with:', updated);
     const merged = { ...get(settings), ...updated };
     localStorage.setItem('talktome-settings', JSON.stringify(merged));
     settings.set(merged as any);
@@ -84,6 +138,11 @@
     
     if (updated.hasOwnProperty('sttModel')) {
       settings.setSttModel(updated.sttModel!);
+    }
+    
+    if (updated.hasOwnProperty('translationModel')) {
+      console.log('Setting translation model to:', updated.translationModel);
+      settings.setTranslationModel(updated.translationModel!);
     }
   }
 
@@ -138,7 +197,8 @@
     currentSettings = {
       apiEndpoint: 'https://api.openai.com/v1',
       apiKey: '',
-      sttModel: 'whisper-large-v3'
+      sttModel: 'whisper-large-v3',
+      translationModel: 'gpt-3.5-turbo'
     };
     persistSettings(currentSettings);
     // brief success feedback on reset
@@ -173,6 +233,7 @@
       // If connectivity test passes, automatically load available models
       if (result.success) {
         await loadAvailableModels();
+        await loadAvailableTranslationModels();
       }
     } catch (error) {
       console.error('API connectivity test failed:', error);
@@ -269,6 +330,56 @@
           {:else}
             <p class="text-xs text-gray-500 dark:text-gray-400 mt-1">
               Choose the speech-to-text model for transcription. Click "Refresh Models" to load available models from your API.
+            </p>
+          {/if}
+        </div>
+
+        <div>
+          <div class="flex items-center justify-between mb-2">
+            <label for="translationModel" class="block text-sm font-medium text-gray-700 dark:text-gray-300">
+              Translation Model
+            </label>
+            <button
+              on:click={loadAvailableTranslationModels}
+              class="px-3 py-1 text-xs bg-gray-100 dark:bg-gray-700 text-gray-600 dark:text-gray-300 rounded hover:bg-gray-200 dark:hover:bg-gray-600 transition-colors flex items-center"
+              disabled={isLoadingTranslationModels || !currentSettings.apiEndpoint.trim() || !currentSettings.apiKey.trim()}
+              title="Refresh available translation models from API"
+            >
+              {#if isLoadingTranslationModels}
+                <svg class="w-3 h-3 mr-1 animate-spin" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 6v6m0 0v6m0-6h6m-6 0H6"></path>
+                </svg>
+                Loading...
+              {:else}
+                <svg class="w-3 h-3 mr-1" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"></path>
+                </svg>
+                Refresh Models
+              {/if}
+            </button>
+          </div>
+          <select
+            id="translationModel"
+            bind:value={currentSettings.translationModel}
+            on:change={() => persistSettings({ translationModel: currentSettings.translationModel })}
+            class="w-full px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-md shadow-sm focus:outline-none focus:ring-blue-500 focus:border-blue-500 dark:bg-gray-700 dark:text-white"
+            disabled={isLoadingTranslationModels}
+          >
+            {#each availableTranslationModels as model}
+              <option value={model}>{model}</option>
+            {/each}
+          </select>
+          {#if translationModelsError}
+            <p class="text-xs text-red-500 dark:text-red-400 mt-1">
+              {translationModelsError}
+            </p>
+          {:else if availableTranslationModels.length > 5}
+            <p class="text-xs text-gray-500 dark:text-gray-400 mt-1">
+              {availableTranslationModels.length} models available. Choose the model for text translation and correction.
+            </p>
+          {:else}
+            <p class="text-xs text-gray-500 dark:text-gray-400 mt-1">
+              Choose the model for text translation and correction. Click "Refresh Models" to load available models from your API.
             </p>
           {/if}
         </div>

@@ -9,6 +9,7 @@ interface Settings {
   apiEndpoint: string;
   apiKey: string;
   sttModel: string;
+  translationModel: string;
   hotkeys: {
     pushToTalk: string;
     handsFree: string;
@@ -34,6 +35,7 @@ const defaultSettings: Settings = {
   apiEndpoint: "https://api.openai.com/v1",
   apiKey: "",
   sttModel: "whisper-large-v3",
+  translationModel: "gpt-3.5-turbo",
   hotkeys: {
     pushToTalk: "Ctrl+Win",
     handsFree: "Ctrl+Win+Space",
@@ -126,6 +128,7 @@ function createSettingsStore() {
         api_endpoint: currentSettings.apiEndpoint,
         api_key: "", // Always send empty - API key is stored separately for security
         stt_model: currentSettings.sttModel,
+        translation_model: currentSettings.translationModel,
         auto_mute: currentSettings.autoMute,
         translation_enabled: currentSettings.translationLanguage !== 'none',
         debug_logging: currentSettings.debugLogging,
@@ -295,6 +298,19 @@ function createSettingsStore() {
         return newSettings;
       });
     },
+    setTranslationModel: (model: string) => {
+      update(settings => {
+        const newSettings = { ...settings, translationModel: model };
+        // SECURITY: Never store API key in localStorage
+        const settingsForLocalStorage = { ...newSettings, apiKey: "" };
+        localStorage.setItem('talktome-settings', JSON.stringify(settingsForLocalStorage));
+        // Sync to backend for consistency
+        setTimeout(() => {
+          syncToBackend();
+        }, 0);
+        return newSettings;
+      });
+    },
   updateHotkeys: async (hotkeys: { pushToTalk: string; handsFree: string }) => {
       update(settings => {
         const newSettings = { ...settings, hotkeys };
@@ -406,6 +422,83 @@ function createSettingsStore() {
         console.error('Failed to fetch models:', error);
         
         let errorMessage = 'Failed to fetch models from API';
+        if (error instanceof Error) {
+          errorMessage = error.message;
+        } else if (typeof error === 'string') {
+          errorMessage = error;
+        }
+        
+        return { 
+          success: false, 
+          models: [],
+          message: errorMessage
+        };
+      }
+    },
+
+    async fetchAvailableTranslationModels(endpoint?: string, apiKey?: string): Promise<{ success: boolean; models: string[]; message?: string }> {
+      try {
+        // Use provided parameters or fall back to current settings
+        const currentSettings = get(settings);
+        const testEndpoint = endpoint || currentSettings.apiEndpoint;
+        const testApiKey = apiKey || currentSettings.apiKey;
+        
+        if (!testEndpoint.trim()) {
+          return { success: false, models: [], message: 'API endpoint is required' };
+        }
+        
+        if (!testApiKey.trim()) {
+          return { success: false, models: [], message: 'API key is required' };
+        }
+        
+        // Fetch models from the API
+        const response = await fetch(`${testEndpoint.replace(/\/+$/, '')}/models`, {
+          method: 'GET',
+          headers: {
+            'Authorization': `Bearer ${testApiKey}`,
+            'Content-Type': 'application/json',
+          },
+        });
+        
+        if (!response.ok) {
+          throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+        }
+        
+        const data = await response.json();
+        
+        // Extract model IDs and filter out non-translation models
+        const allModels = data.data || [];
+        const filteredModels = allModels
+          .filter((model: any) => {
+            if (!model.id) return false;
+            const modelId = model.id.toLowerCase();
+            
+            // Filter out models that are not suitable for translation/text generation
+            const excludeTerms = [
+              'whisper', 'audio', 'tts', 'image', 'flux', 'dall', 'stable', 
+              'shuttle', 'embed', 'rerank', 'vision', 'moderation', 'canary',
+              'instruct', 'code', 'reasoning'
+            ];
+            
+            return !excludeTerms.some(term => modelId.includes(term));
+          })
+          .map((model: any) => model.id)
+          .sort();
+        
+        // If no suitable models found, return the static list
+        const models = filteredModels.length > 0 ? filteredModels : [
+          'gpt-3.5-turbo', 'gpt-4', 'gpt-4-turbo', 'gpt-4o', 'gpt-4o-mini'
+        ];
+        
+        return { 
+          success: true, 
+          models,
+          message: `Found ${models.length} available translation models`
+        };
+      } catch (error) {
+        console.error('Failed to fetch translation models:', error);
+        
+        let errorMessage = 'Failed to fetch translation models from API';
         if (error instanceof Error) {
           errorMessage = error.message;
         } else if (typeof error === 'string') {

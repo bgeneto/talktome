@@ -203,6 +203,7 @@
         sttModel: currentSettings.sttModel,
         autoMute: currentSettings.autoMute,
         translationEnabled: currentSettings.translationLanguage !== "none",
+        translationModel: currentSettings.translationModel,
       });
       isRecording = true;
       isListening = true;

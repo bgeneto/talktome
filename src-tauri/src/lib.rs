@@ -199,7 +199,8 @@ async fn start_recording(
     api_endpoint: String,
     stt_model: String,
     auto_mute: bool,
-    translation_enabled: bool
+    translation_enabled: bool,
+    translation_model: String
 ) -> Result<(), String> {
     // Check if already recording
     {
@@ -231,6 +232,7 @@ async fn start_recording(
         auto_save: true, // Not used in recording
         api_endpoint,
         stt_model,
+        translation_model: translation_model.clone(),
         hotkeys: crate::settings::Hotkeys {
             push_to_talk: "".to_string(), // Not used in recording
             hands_free: "".to_string(), // Not used in recording
@@ -267,11 +269,11 @@ async fn start_recording(
     
     let translation_service = if settings.translation_enabled && settings.translation_language != "none" {
         DebugLogger::log_info("Creating translation service (translation enabled)");
-        Some(TranslationService::new(settings.api_endpoint.clone(), api_key))
+        Some(TranslationService::new(settings.api_endpoint.clone(), api_key, settings.translation_model.clone()))
     } else {
         // Always create translation service for text correction
         DebugLogger::log_info("Creating translation service (text correction only)");
-        Some(TranslationService::new(settings.api_endpoint.clone(), api_key))
+        Some(TranslationService::new(settings.api_endpoint.clone(), api_key, settings.translation_model.clone()))
     };
     DebugLogger::log_info("Translation service created");
     
@@ -776,6 +778,7 @@ async fn save_settings_from_frontend(
     api_endpoint: String,
     api_key: String,
     stt_model: String,
+    translation_model: String,
     auto_mute: bool,
     translation_enabled: bool,
     debug_logging: bool,
@@ -783,8 +786,8 @@ async fn save_settings_from_frontend(
     hands_free_hotkey: String
 ) -> Result<(), String> {
     // Log the settings being saved (without logging the API key for security)
-    DebugLogger::log_info(&format!("SETTINGS_SAVE: spoken_language={}, translation_language={}, audio_device={}, theme={}, api_endpoint={}, stt_model={}, api_key_provided={}, auto_mute={}, translation_enabled={}, debug_logging={}, push_to_talk={}, hands_free={}", 
-        spoken_language, translation_language, audio_device, theme, api_endpoint, stt_model, !api_key.is_empty(), auto_mute, translation_enabled, debug_logging, push_to_talk_hotkey, hands_free_hotkey));
+    DebugLogger::log_info(&format!("SETTINGS_SAVE: spoken_language={}, translation_language={}, audio_device={}, theme={}, api_endpoint={}, stt_model={}, translation_model={}, api_key_provided={}, auto_mute={}, translation_enabled={}, debug_logging={}, push_to_talk={}, hands_free={}", 
+        spoken_language, translation_language, audio_device, theme, api_endpoint, stt_model, translation_model, !api_key.is_empty(), auto_mute, translation_enabled, debug_logging, push_to_talk_hotkey, hands_free_hotkey));
 
     // Store API key securely if provided and not empty
     // (Note: we now send empty string for security, so API key is stored separately via store_api_key command)

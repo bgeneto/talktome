@@ -12,6 +12,7 @@ pub struct AppSettings {
     pub auto_save: bool,
     pub api_endpoint: String,
     pub stt_model: String,
+    pub translation_model: String,
     pub hotkeys: Hotkeys,
     pub auto_mute: bool,
     pub translation_enabled: bool,
@@ -37,6 +38,7 @@ impl Default for AppSettings {
             auto_save: true,
             api_endpoint: "https://api.openai.com/v1".to_string(),
             stt_model: "whisper-large-v3".to_string(),
+            translation_model: "gpt-3.5-turbo".to_string(),
             hotkeys: Hotkeys {
                 push_to_talk: "Ctrl+Win".to_string(),
                 hands_free: "Ctrl+Win+Space".to_string(),
@@ -111,4 +113,3 @@ impl AppSettings {
         Ok(app_dir)
     }
 }
-

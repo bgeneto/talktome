@@ -79,7 +79,7 @@ Tauri Version: 2.0.0
         TalkToMe
       </h2>
       <p class="text-lg text-gray-600 dark:text-gray-400 mb-4">
-        Voice-to-Text with Translation App
+        Voice-to-Text with Translation
       </p>
       <div class="text-sm text-gray-500 dark:text-gray-400 space-y-1">
         <p>Version {appVersion}</p>
