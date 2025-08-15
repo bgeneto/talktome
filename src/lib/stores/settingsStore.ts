@@ -13,6 +13,7 @@ interface Settings {
     handsFree: string;
   };
   autoMute: boolean;
+  debugLogging: boolean;
   quickAccessLanguages: string[];
 }
 
@@ -28,6 +29,7 @@ const defaultSettings: Settings = {
     handsFree: "Ctrl+Win+Space",
   },
   autoMute: true,
+  debugLogging: false,
   quickAccessLanguages: [],
   };
 

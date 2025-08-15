@@ -1,5 +1,6 @@
 use reqwest;
 use serde_json::{json, Value};
+use crate::debug_logger::DebugLogger;
 
 pub struct TranslationService {
     client: reqwest::Client,
@@ -46,11 +47,12 @@ impl TranslationService {
             )
         };
 
+        DebugLogger::log_translation_request(text, source_lang, target_lang, translate_enabled, &prompt);
+        
         self.send_chat_request(&prompt).await
     }
 
     async fn send_chat_request(&self, prompt: &str) -> Result<String, String> {
-
         // Create the request body
         let body = json!({
             "model": "gpt-3.5-turbo",
@@ -64,8 +66,11 @@ impl TranslationService {
             "max_tokens": 1000
         });
 
-        // Send request to chat completion API
+        // Log the full API request
         let url = format!("{}/chat/completions", self.api_endpoint);
+        DebugLogger::log_api_payload(&body, &url);
+
+        // Send request to chat completion API
         let response = self.client
             .post(&url)
             .header("Authorization", format!("Bearer {}", self.api_key))
@@ -73,18 +78,48 @@ impl TranslationService {
             .json(&body)
             .send()
             .await
-            .map_err(|e| e.to_string())?;
+            .map_err(|e| {
+                let error_msg = format!("Request failed: {}", e);
+                DebugLogger::log_pipeline_error("translation", &error_msg);
+                error_msg
+            })?;
+
+        let status = response.status();
+        DebugLogger::log_info(&format!("Translation API response status: {}", status));
 
         if response.status().is_success() {
-            let json: Value = response.json().await.map_err(|e| e.to_string())?;
+            let response_text = response.text().await
+                .map_err(|e| {
+                    let error_msg = format!("Failed to read response: {}", e);
+                    DebugLogger::log_pipeline_error("translation", &error_msg);
+                    error_msg
+                })?;
+            
+            DebugLogger::log_info(&format!("Translation API raw response: {}", response_text));
+            
+            let json: Value = serde_json::from_str(&response_text)
+                .map_err(|e| {
+                    let error_msg = format!("JSON parsing error: {}", e);
+                    DebugLogger::log_pipeline_error("translation", &error_msg);
+                    error_msg
+                })?;
+            
             if let Some(translated_text) = json["choices"][0]["message"]["content"].as_str() {
-                Ok(translated_text.trim().to_string())
+                let result = translated_text.trim().to_string();
+                DebugLogger::log_info(&format!("Translation API extracted text: '{}'", result));
+                Ok(result)
             } else {
-                Err("No translation in response".to_string())
+                let error_msg = "No translation in response".to_string();
+                DebugLogger::log_pipeline_error("translation", &error_msg);
+                DebugLogger::log_translation_response(false, None, Some(&error_msg), Some(&response_text));
+                Err(error_msg)
             }
         } else {
-            let error_text = response.text().await.map_err(|e| e.to_string())?;
-            Err(format!("API error: {}", error_text))
+            let error_text = response.text().await.unwrap_or_default();
+            let error_msg = format!("API error: {} - {}", status, error_text);
+            DebugLogger::log_pipeline_error("translation", &error_msg);
+            DebugLogger::log_translation_response(false, None, Some(&error_msg), Some(&error_text));
+            Err(error_msg)
         }
     }
 

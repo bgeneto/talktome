@@ -9,7 +9,6 @@
     "Live language translation",
     "Smart noise filtering",
     "Customizable themes",
-    "Export capabilities (TXT, PDF, DOC)",
     "System tray integration",
     "Global hotkey support",
     "Multi-language support",

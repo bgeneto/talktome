@@ -14,6 +14,7 @@ pub struct AppSettings {
     pub hotkeys: Hotkeys,
     pub auto_mute: bool,
     pub translation_enabled: bool,
+    pub debug_logging: bool,
     // Note: api_key is handled separately via Stronghold for security
 }
 
@@ -38,6 +39,7 @@ impl Default for AppSettings {
             },
             auto_mute: true,
             translation_enabled: false,
+            debug_logging: false,
         }
     }
 }
@@ -112,5 +114,17 @@ impl AppSettings {
     fn get_api_key_path(app_handle: &AppHandle) -> Result<PathBuf, String> {
         let app_dir = app_handle.path().app_data_dir().map_err(|e| e.to_string())?;
         Ok(app_dir.join("api.key"))
+    }
+}
+
+// Helper functions for getting specific settings
+pub fn get_setting_bool(app_handle: &AppHandle, key: &str) -> Result<bool, String> {
+    let settings = AppSettings::load(app_handle).map_err(|e| e.to_string())?;
+    match key {
+        "auto_save" => Ok(settings.auto_save),
+        "auto_mute" => Ok(settings.auto_mute),
+        "translation_enabled" => Ok(settings.translation_enabled),
+        "debug_logging" => Ok(settings.debug_logging),
+        _ => Err(format!("Unknown boolean setting: {}", key))
     }
 }

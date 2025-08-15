@@ -18,6 +18,8 @@ mod text_insertion;
 use text_insertion::TextInsertionService;
 mod system_audio;
 use system_audio::SystemAudioControl;
+mod debug_logger;
+use debug_logger::DebugLogger;
 
 // Global state to track registered hotkeys and active recording
 type HotkeyRegistry = Mutex<HashMap<String, String>>;
@@ -258,18 +260,27 @@ async fn start_recording(app: AppHandle, recording_state: State<'_, RecordingSta
         let app = app_clone;
         let settings = settings;
         
+        DebugLogger::log_info("Starting audio processing pipeline");
+        
         // Process audio chunks
         while let Some(audio_chunk) = audio_rx.recv().await {
             // Check if recording has been stopped
             {
                 let state = recording_state_clone.lock().unwrap();
                 if !*state {
+                    DebugLogger::log_info("Recording stopped, breaking audio processing loop");
                     break;
                 }
             }
             
+            // Log audio chunk details
+            let max_amplitude = audio_chunk.data.iter().map(|&x| x.abs()).fold(0.0, f32::max);
+            let has_activity = audio_chunk.has_audio_activity();
+            DebugLogger::log_audio_chunk(audio_chunk.data.len(), audio_chunk.sample_rate, has_activity, max_amplitude);
+            
             // Skip empty or silent chunks
-            if audio_chunk.is_empty() || !audio_chunk.has_audio_activity() {
+            if audio_chunk.is_empty() || !has_activity {
+                DebugLogger::log_info("Skipping empty or silent audio chunk");
                 continue;
             }
             
@@ -279,6 +290,8 @@ async fn start_recording(app: AppHandle, recording_state: State<'_, RecordingSta
             // Transcribe audio chunk
             match stt_service.transcribe_chunk(audio_chunk.data, audio_chunk.sample_rate).await {
                 Ok(transcribed_text) => {
+                    DebugLogger::log_transcription_response(true, Some(&transcribed_text), None);
+                    
                     if !transcribed_text.trim().is_empty() {
                         // Always process text through translation service for correction/translation
                         let final_text = if let Some(ref translation_service) = translation_service {
@@ -288,31 +301,45 @@ async fn start_recording(app: AppHandle, recording_state: State<'_, RecordingSta
                                 &settings.translation_language,
                                 settings.translation_enabled
                             ).await {
-                                Ok(processed_text) => processed_text,
+                                Ok(processed_text) => {
+                                    DebugLogger::log_translation_response(true, Some(&processed_text), None, None);
+                                    processed_text
+                                },
                                 Err(e) => {
-                                    eprintln!("Text processing error: {}", e);
+                                    DebugLogger::log_translation_response(false, None, Some(&e), None);
+                                    DebugLogger::log_pipeline_error("translation", &e);
                                     // Emit error to frontend
-                                    let _ = app.emit("processing-error", format!("Text processing error: {}", e));
+                                    let _ = app.emit("processing-error", format!("Translation Error: {}", e));
                                     transcribed_text.clone() // Fallback to original text
                                 }
                             }
                         } else {
+                            DebugLogger::log_info("No translation service, using original transcribed text");
                             transcribed_text.clone()
                         };
                         
                         // Insert text into focused application
-                        if let Err(e) = text_insertion_service.insert_text(&final_text) {
-                            eprintln!("Text insertion error: {}", e);
-                            let _ = app.emit("processing-error", format!("Text insertion error: {}", e));
+                        match text_insertion_service.insert_text(&final_text) {
+                            Ok(_) => {
+                                DebugLogger::log_text_insertion(&final_text, true, None);
+                            },
+                            Err(e) => {
+                                DebugLogger::log_text_insertion(&final_text, false, Some(&e));
+                                DebugLogger::log_pipeline_error("text_insertion", &e);
+                                let _ = app.emit("processing-error", format!("Text insertion error: {}", e));
+                            }
                         }
                         
                         // Emit success event to frontend with transcribed text
                         let _ = app.emit("transcribed-text", &final_text);
                         let _ = app.emit("processing-audio", false);
+                    } else {
+                        DebugLogger::log_info("Transcribed text is empty, skipping processing");
                     }
                 }
                 Err(e) => {
-                    eprintln!("Transcription error: {}", e);
+                    DebugLogger::log_transcription_response(false, None, Some(&e));
+                    DebugLogger::log_pipeline_error("transcription", &e);
                     let _ = app.emit("processing-error", format!("Transcription error: {}", e));
                     let _ = app.emit("processing-audio", false);
                 }
@@ -577,6 +604,23 @@ async fn update_auto_mute(app: AppHandle, enabled: bool) -> Result<(), String> {
 }
 
 #[tauri::command]
+async fn update_debug_logging(app: AppHandle, enabled: bool) -> Result<(), String> {
+    let mut settings = AppSettings::load(&app).map_err(|e| e.to_string())?;
+    settings.debug_logging = enabled;
+    settings.save(&app)?;
+    
+    // Re-initialize debug logging if enabled, or do nothing if disabled
+    if enabled {
+        DebugLogger::init(&app)?;
+        DebugLogger::log_info("Debug logging enabled");
+    } else {
+        DebugLogger::log_info("Debug logging disabled - this will be the last message");
+    }
+    
+    Ok(())
+}
+
+#[tauri::command]
 async fn get_available_audio_devices() -> Result<Vec<String>, String> {
     use cpal::traits::{DeviceTrait, HostTrait};
     
@@ -627,6 +671,21 @@ async fn test_audio_capture() -> Result<String, String> {
 async fn get_recording_status(recording_state: State<'_, RecordingState>) -> Result<bool, String> {
     let state = recording_state.inner().lock().map_err(|e| e.to_string())?;
     Ok(*state)
+}
+
+#[tauri::command]
+async fn get_debug_logs(app: AppHandle, lines: Option<usize>) -> Result<String, String> {
+    DebugLogger::get_recent_logs(&app, lines.unwrap_or(100))
+}
+
+#[tauri::command]
+async fn clear_debug_logs(app: AppHandle) -> Result<(), String> {
+    DebugLogger::clear_log(&app)
+}
+
+#[tauri::command]
+async fn get_log_file_path(app: AppHandle) -> Result<String, String> {
+    DebugLogger::get_log_file_path(&app)
 }
 
 fn update_tray_menu(app: &AppHandle, settings: &AppSettings) -> Result<(), Box<dyn std::error::Error>> {
@@ -804,13 +863,27 @@ pub fn run() {
             update_api_endpoint,
             toggle_translation,
             update_auto_mute,
+            update_debug_logging,
             get_available_audio_devices,
             test_audio_capture,
-            get_recording_status
+            get_recording_status,
+            get_debug_logs,
+            clear_debug_logs,
+            get_log_file_path
         ])
         .setup(|app| {
+            // Initialize debug logging first
+            if let Err(e) = DebugLogger::init(&app.handle()) {
+                eprintln!("Failed to initialize debug logging: {}", e);
+            }
+            
+            DebugLogger::log_info("TalkToMe application starting up");
+            
             // Load current settings
             let settings = AppSettings::load(&app.handle()).unwrap_or_default();
+            
+            DebugLogger::log_info(&format!("Loaded settings: spoken_lang={}, target_lang={}, translation_enabled={}, auto_mute={}", 
+                settings.spoken_language, settings.translation_language, settings.translation_enabled, settings.auto_mute));
             
             // Create the system tray menu with checkmarks
             let tray_menu = {

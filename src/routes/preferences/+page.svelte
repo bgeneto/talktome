@@ -11,7 +11,8 @@
       pushToTalk: 'Ctrl+Win',
       handsFree: 'Ctrl+Win+Space'
     },
-    autoMute: true
+    autoMute: true,
+    debugLogging: false
   };
 
   let saveSuccess = false;
@@ -28,6 +29,15 @@
     
     return () => unsubscribe();
   });
+
+  // Handle changes to specific settings
+  function handleAutoMuteChange() {
+    persistSettings({ autoMute: currentSettings.autoMute });
+  }
+
+  function handleDebugLoggingChange() {
+    persistSettings({ debugLogging: currentSettings.debugLogging });
+  }
 
   function applyTheme(theme: 'auto' | 'light' | 'dark') {
     // Map 'auto' to current system preference, then set DOM class and localStorage 'theme'
@@ -52,6 +62,15 @@
     localStorage.setItem('talktome-settings', JSON.stringify(merged));
     // Cast since the store's Settings type includes extra fields we preserve from get(settings)
     settings.set(merged as any);
+    
+    // Update backend for specific settings that require it
+    if (updated.hasOwnProperty('autoMute')) {
+      invoke('update_auto_mute', { enabled: updated.autoMute }).catch(console.error);
+    }
+    
+    if (updated.hasOwnProperty('debugLogging')) {
+      invoke('update_debug_logging', { enabled: updated.debugLogging }).catch(console.error);
+    }
   }
 
   // --- Hotkey capture helpers ---
@@ -176,7 +195,8 @@ function savePreferences() {
         pushToTalk: 'Ctrl+Win',
         handsFree: 'Ctrl+Win+Space'
       },
-      autoMute: true
+      autoMute: true,
+      debugLogging: false
     };
   persistSettings(currentSettings);
   applyTheme(currentSettings.theme as 'auto' | 'light' | 'dark');
@@ -387,6 +407,7 @@ function savePreferences() {
             type="checkbox"
             id="autoMute"
             bind:checked={currentSettings.autoMute}
+            on:change={handleAutoMuteChange}
             class="h-4 w-4 text-blue-600 focus:ring-blue-500 border-gray-300 rounded"
           >
           <label for="autoMute" class="ml-2 block text-sm text-gray-700 dark:text-gray-300">
@@ -395,6 +416,22 @@ function savePreferences() {
         </div>
         <p class="ml-6 text-xs text-gray-500 dark:text-gray-400">
           Automatically mute music and media playback while recording to improve transcription accuracy
+        </p>
+
+        <div class="flex items-center">
+          <input
+            type="checkbox"
+            id="debugLogging"
+            bind:checked={currentSettings.debugLogging}
+            on:change={handleDebugLoggingChange}
+            class="h-4 w-4 text-blue-600 focus:ring-blue-500 border-gray-300 rounded"
+          >
+          <label for="debugLogging" class="ml-2 block text-sm text-gray-700 dark:text-gray-300">
+            Enable debug logging to file
+          </label>
+        </div>
+        <p class="ml-6 text-xs text-gray-500 dark:text-gray-400">
+          Log detailed information about the record → transcribe → translate pipeline to help troubleshoot issues
         </p>
       </div>
     </div>

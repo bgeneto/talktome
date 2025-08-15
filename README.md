@@ -9,7 +9,6 @@ A modern cross-platform desktop application built with Tauri, Svelte, and Tailwi
 - **Cross-platform**: Runs on Windows, macOS, and Linux
 - **Modern UI**: Beautiful, responsive interface with dark/light theme support
 - **Smart Audio Processing**: Advanced voice recognition with noise filtering
-- **Export Capabilities**: Save transcriptions and translations to files
 - **Multi-language Support**: Support for 10+ languages for both input and output
 
 ## Technology Stack
