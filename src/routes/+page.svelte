@@ -200,6 +200,7 @@
         spokenLanguage: currentSettings.spokenLanguage,
         translationLanguage: currentSettings.translationLanguage,
         apiEndpoint: currentSettings.apiEndpoint,
+        sttModel: currentSettings.sttModel,
         autoMute: currentSettings.autoMute,
         translationEnabled: currentSettings.translationLanguage !== "none",
       });

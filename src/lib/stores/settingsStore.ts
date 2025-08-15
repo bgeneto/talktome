@@ -8,6 +8,7 @@ interface Settings {
   theme: string;
   apiEndpoint: string;
   apiKey: string;
+  sttModel: string;
   hotkeys: {
     pushToTalk: string;
     handsFree: string;
@@ -15,6 +16,14 @@ interface Settings {
   autoMute: boolean;
   debugLogging: boolean;
   quickAccessLanguages: string[];
+  vad: {
+    speechThreshold: number;      // Energy threshold for speech detection
+    silenceThreshold: number;     // Energy threshold for silence
+    maxChunkDurationMs: number;   // Maximum chunk duration (0.5-1s for real-time)
+    silenceTimeoutMs: number;     // Silence timeout before ending chunk
+    overlapMs: number;           // Overlap to prevent word cutting
+    sampleRate: number;          // 16kHz for speech (instead of 48kHz)
+  };
 }
 
 const defaultSettings: Settings = {
@@ -24,6 +33,7 @@ const defaultSettings: Settings = {
   theme: "auto",
   apiEndpoint: "https://api.openai.com/v1",
   apiKey: "",
+  sttModel: "whisper-large-v3",
   hotkeys: {
     pushToTalk: "Ctrl+Win",
     handsFree: "Ctrl+Win+Space",
@@ -31,7 +41,15 @@ const defaultSettings: Settings = {
   autoMute: true,
   debugLogging: false,
   quickAccessLanguages: [],
-  };
+  vad: {
+    speechThreshold: 0.001,       // Sensitive for real-time
+    silenceThreshold: 0.0005,     // Low silence threshold
+    maxChunkDurationMs: 800,      // 0.8s chunks for sub-second latency
+    silenceTimeoutMs: 300,        // 300ms timeout for responsiveness
+    overlapMs: 150,               // 150ms overlap to prevent word cutting
+    sampleRate: 16000,            // 16kHz for speech (not 48kHz)
+  },
+};
 
 function createSettingsStore() {
   let initialSettings: Settings;
@@ -107,6 +125,7 @@ function createSettingsStore() {
         theme: currentSettings.theme,
         api_endpoint: currentSettings.apiEndpoint,
         api_key: "", // Always send empty - API key is stored separately for security
+        stt_model: currentSettings.sttModel,
         auto_mute: currentSettings.autoMute,
         translation_enabled: currentSettings.translationLanguage !== 'none',
         debug_logging: currentSettings.debugLogging,
@@ -209,6 +228,22 @@ function createSettingsStore() {
         return newSettings;
       });
     },
+    setVadSettings: (vadSettings: Partial<Settings['vad']>) => {
+      update(settings => {
+        const newSettings = { 
+          ...settings, 
+          vad: { ...settings.vad, ...vadSettings }
+        };
+        // SECURITY: Never store API key in localStorage
+        const settingsForLocalStorage = { ...newSettings, apiKey: "" };
+        localStorage.setItem('talktome-settings', JSON.stringify(settingsForLocalStorage));
+        // Sync to backend for real-time VAD updates
+        setTimeout(() => {
+          syncToBackend();
+        }, 0);
+        return newSettings;
+      });
+    },
     setApiEndpoint: (endpoint: string) => {
       update(settings => {
         const newSettings = { ...settings, apiEndpoint: endpoint };
@@ -241,6 +276,19 @@ function createSettingsStore() {
           });
         
         // Sync other settings to backend for consistency
+        setTimeout(() => {
+          syncToBackend();
+        }, 0);
+        return newSettings;
+      });
+    },
+    setSttModel: (model: string) => {
+      update(settings => {
+        const newSettings = { ...settings, sttModel: model };
+        // SECURITY: Never store API key in localStorage
+        const settingsForLocalStorage = { ...newSettings, apiKey: "" };
+        localStorage.setItem('talktome-settings', JSON.stringify(settingsForLocalStorage));
+        // Sync to backend for consistency
         setTimeout(() => {
           syncToBackend();
         }, 0);
@@ -300,6 +348,74 @@ function createSettingsStore() {
         return { 
           success: false, 
           message: 'API connectivity test failed. Please check your API endpoint and key.'
+        };
+      }
+    },
+
+    async fetchAvailableModels(endpoint?: string, apiKey?: string): Promise<{ success: boolean; models: string[]; message?: string }> {
+      try {
+        // Use provided parameters or fall back to current settings
+        const currentSettings = get(settings);
+        const testEndpoint = endpoint || currentSettings.apiEndpoint;
+        const testApiKey = apiKey || currentSettings.apiKey;
+        
+        if (!testEndpoint.trim()) {
+          return { success: false, models: [], message: 'API endpoint is required' };
+        }
+        
+        if (!testApiKey.trim()) {
+          return { success: false, models: [], message: 'API key is required' };
+        }
+        
+        // Fetch models from the API
+        const response = await fetch(`${testEndpoint.replace(/\/+$/, '')}/models`, {
+          method: 'GET',
+          headers: {
+            'Authorization': `Bearer ${testApiKey}`,
+            'Content-Type': 'application/json',
+          },
+        });
+        
+        if (!response.ok) {
+          throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+        }
+        
+        const data = await response.json();
+        
+        // Extract model IDs and filter for speech-to-text models (whisper models)
+        const allModels = data.data || [];
+        const speechModels = allModels
+          .filter((model: any) => model.id && (
+            model.id.toLowerCase().includes('whisper') ||
+            model.id.toLowerCase().includes('speech') ||
+            model.id.toLowerCase().includes('stt') ||
+            model.id.toLowerCase().includes('transcribe')
+          ))
+          .map((model: any) => model.id)
+          .sort();
+        
+        // If no speech models found, return all models
+        const models = speechModels.length > 0 ? speechModels : allModels.map((model: any) => model.id).sort();
+        
+        return { 
+          success: true, 
+          models,
+          message: `Found ${models.length} available models`
+        };
+      } catch (error) {
+        console.error('Failed to fetch models:', error);
+        
+        let errorMessage = 'Failed to fetch models from API';
+        if (error instanceof Error) {
+          errorMessage = error.message;
+        } else if (typeof error === 'string') {
+          errorMessage = error;
+        }
+        
+        return { 
+          success: false, 
+          models: [],
+          message: errorMessage
         };
       }
     },

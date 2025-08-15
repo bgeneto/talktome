@@ -7,10 +7,11 @@ pub struct STTService {
     client: reqwest::Client,
     api_endpoint: String,
     api_key: String,
+    model: String,
 }
 
 impl STTService {
-    pub fn new(api_endpoint: String, api_key: String) -> Self {
+    pub fn new(api_endpoint: String, api_key: String, model: String) -> Self {
         let client = reqwest::Client::builder()
             .timeout(Duration::from_secs(30))
             .build()
@@ -20,6 +21,7 @@ impl STTService {
             client,
             api_endpoint,
             api_key,
+            model,
         }
     }
 
@@ -76,7 +78,7 @@ impl STTService {
             // Create multipart form data fresh for each attempt
             DebugLogger::log_info("STT: Creating multipart form data");
             let form = reqwest::multipart::Form::new()
-                .text("model", "whisper-1")
+                .text("model", self.model.clone())
                 .text("response_format", "json")
                 .text("language", "en") // Optional: specify language if known
                 .part("file", reqwest::multipart::Part::bytes(audio_bytes.clone())

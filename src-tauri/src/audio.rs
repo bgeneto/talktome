@@ -2,30 +2,252 @@ use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::{FromSample, Sample};
 use std::sync::{Arc, Mutex};
 use std::sync::mpsc;
-use std::time::{Duration, Instant};
 use crate::debug_logger::DebugLogger;
 
 pub struct AudioCapture {
     stream: Option<cpal::Stream>,
     tx: Option<mpsc::Sender<AudioChunk>>,
     is_recording: Arc<Mutex<bool>>,
+    vad: Arc<Mutex<VoiceActivityDetector>>,
+}
+
+/// Voice Activity Detection configuration and state
+pub struct VoiceActivityDetector {
+    pub speech_threshold: f32,     // Energy threshold for speech detection
+    pub silence_threshold: f32,    // Energy threshold for silence
+    pub min_speech_duration_ms: u64,  // Minimum duration for speech chunk
+    pub max_speech_duration_ms: u64,  // Maximum duration for speech chunk (0.5-1s for real-time)
+    pub silence_timeout_ms: u64,   // Time to wait in silence before ending chunk
+    pub overlap_ms: u64,           // Overlap to prevent word cutting
+    
+    // Internal state
+    current_state: VadState,
+    state_start_time: std::time::Instant,
+    current_chunk: Vec<f32>,
+    overlap_buffer: Vec<f32>,      // Buffer for overlap handling
+    sample_rate: u32,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+enum VadState {
+    Silence,
+    Speech,
+    SilenceAfterSpeech,
+}
+
+impl Default for VoiceActivityDetector {
+    fn default() -> Self {
+        Self {
+            speech_threshold: 0.001,        // Lower threshold for more sensitivity
+            silence_threshold: 0.0005,      // Lower silence threshold
+            min_speech_duration_ms: 100,    // Shorter minimum for testing
+            max_speech_duration_ms: 1000,   // 1 second maximum for real-time (was 30s)
+            silence_timeout_ms: 300,        // 300ms timeout for responsiveness (was 1s)
+            overlap_ms: 150,                // 150ms overlap to prevent word cutting
+            
+            current_state: VadState::Silence,
+            state_start_time: std::time::Instant::now(),
+            current_chunk: Vec::new(),
+            overlap_buffer: Vec::new(),
+            sample_rate: 16000,             // 16kHz instead of 48kHz (better for speech)
+        }
+    }
+}
+
+impl VoiceActivityDetector {
+    pub fn new(sample_rate: u32) -> Self {
+        Self {
+            sample_rate,
+            ..Default::default()
+        }
+    }
+    
+    /// Process audio samples and return completed chunks
+    pub fn process_audio(&mut self, samples: &[f32]) -> Vec<AudioChunk> {
+        let mut completed_chunks = Vec::new();
+        
+        // Add samples to current chunk
+        self.current_chunk.extend_from_slice(samples);
+        
+        // Calculate energy for current samples
+        let energy = self.calculate_energy(samples);
+        
+        // Determine if current samples contain speech
+        let has_speech = energy > self.speech_threshold;
+        let is_silence = energy < self.silence_threshold;
+        
+        let now = std::time::Instant::now();
+        let state_duration = now.duration_since(self.state_start_time);
+        
+        match self.current_state {
+            VadState::Silence => {
+                if has_speech {
+                    // Transition to speech - include overlap from previous chunk
+                    if !self.overlap_buffer.is_empty() {
+                        let mut chunk_with_overlap = self.overlap_buffer.clone();
+                        chunk_with_overlap.extend_from_slice(&self.current_chunk);
+                        self.current_chunk = chunk_with_overlap;
+                        self.overlap_buffer.clear();
+                    }
+                    self.current_state = VadState::Speech;
+                    self.state_start_time = now;
+                }
+                // In silence, keep accumulating but create chunks less frequently
+                if state_duration.as_millis() > 3000 && !self.current_chunk.is_empty() {
+                    // Send silence chunk if we've been silent for 3 seconds
+                    let chunk = AudioChunk::new(
+                        self.current_chunk.clone(),
+                        self.sample_rate,
+                        ChunkType::SilenceChunk,
+                    );
+                    completed_chunks.push(chunk);
+                    self.current_chunk.clear();
+                }
+            }
+            
+            VadState::Speech => {
+                if is_silence {
+                    // Transition to silence after speech
+                    self.current_state = VadState::SilenceAfterSpeech;
+                    self.state_start_time = now;
+                } else if state_duration.as_millis() > self.max_speech_duration_ms as u128 {
+                    // Force chunk completion if speech is too long (0.5-1s for real-time)
+                    self.complete_speech_chunk(&mut completed_chunks);
+                    self.current_state = VadState::Silence;
+                    self.state_start_time = now;
+                }
+            }
+            
+            VadState::SilenceAfterSpeech => {
+                if has_speech {
+                    // Return to speech
+                    self.current_state = VadState::Speech;
+                    self.state_start_time = now;
+                } else if state_duration.as_millis() > self.silence_timeout_ms as u128 {
+                    // Complete speech chunk after silence timeout
+                    if !self.current_chunk.is_empty() {
+                        let total_duration = ((self.current_chunk.len() as f32 / self.sample_rate as f32) * 1000.0) as u64;
+                        
+                        if total_duration >= self.min_speech_duration_ms {
+                            self.complete_speech_chunk(&mut completed_chunks);
+                        }
+                    }
+                    
+                    self.current_chunk.clear();
+                    self.current_state = VadState::Silence;
+                    self.state_start_time = now;
+                }
+            }
+        }
+        
+        completed_chunks
+    }
+    
+    /// Complete a speech chunk with overlap handling
+    fn complete_speech_chunk(&mut self, completed_chunks: &mut Vec<AudioChunk>) {
+        if self.current_chunk.is_empty() {
+            return;
+        }
+        
+        // Calculate overlap size in samples
+        let overlap_samples = ((self.overlap_ms as f32 / 1000.0) * self.sample_rate as f32) as usize;
+        
+        // Create the completed chunk
+        let chunk = AudioChunk::new(
+            self.current_chunk.clone(),
+            self.sample_rate,
+            ChunkType::SpeechChunk,
+        );
+        completed_chunks.push(chunk);
+        
+        // Save overlap for next chunk (last N samples)
+        if self.current_chunk.len() > overlap_samples {
+            let start_idx = self.current_chunk.len() - overlap_samples;
+            self.overlap_buffer = self.current_chunk[start_idx..].to_vec();
+        } else {
+            self.overlap_buffer = self.current_chunk.clone();
+        }
+        
+        self.current_chunk.clear();
+    }
+    
+    fn calculate_energy(&self, samples: &[f32]) -> f32 {
+        if samples.is_empty() {
+            return 0.0;
+        }
+        
+        // RMS energy calculation
+        let sum_squares: f32 = samples.iter().map(|&x| x * x).sum();
+        (sum_squares / samples.len() as f32).sqrt()
+    }
+    
+    /// Force completion of current chunk (useful when stopping recording)
+    pub fn flush(&mut self) -> Option<AudioChunk> {
+        if self.current_chunk.is_empty() {
+            return None;
+        }
+        
+        let chunk_type = match self.current_state {
+            VadState::Speech | VadState::SilenceAfterSpeech => ChunkType::SpeechChunk,
+            VadState::Silence => ChunkType::SilenceChunk,
+        };
+        
+        let chunk = AudioChunk::new(
+            self.current_chunk.clone(),
+            self.sample_rate,
+            chunk_type,
+        );
+        
+        self.current_chunk.clear();
+        self.overlap_buffer.clear(); // Clear overlap on flush
+        self.current_state = VadState::Silence;
+        self.state_start_time = std::time::Instant::now();
+        
+        Some(chunk)
+    }
 }
 
 #[derive(Clone)]
 pub struct AudioChunk {
     pub data: Vec<f32>,
     pub sample_rate: u32,
+    pub timestamp: u64,
+    pub duration_ms: u64,
+    pub chunk_type: ChunkType,
+}
+
+#[derive(Debug, Clone)]
+pub enum ChunkType {
+    SpeechChunk,    // Contains speech activity
+    SilenceChunk,   // Contains only silence
+    Mixed,          // Contains both speech and silence
 }
 
 impl AudioChunk {
+    pub fn new(data: Vec<f32>, sample_rate: u32, chunk_type: ChunkType) -> Self {
+        let duration_ms = ((data.len() as f32 / sample_rate as f32) * 1000.0) as u64;
+        Self {
+            data,
+            sample_rate,
+            timestamp: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_millis() as u64,
+            duration_ms,
+            chunk_type,
+        }
+    }
+
     pub fn is_empty(&self) -> bool {
         self.data.is_empty()
     }
 
     /// Check if audio chunk has sufficient volume to process
     pub fn has_audio_activity(&self) -> bool {
-        let max_amplitude = self.data.iter().map(|&x| x.abs()).fold(0.0, f32::max);
-        max_amplitude > 0.01
+        match self.chunk_type {
+            ChunkType::SpeechChunk | ChunkType::Mixed => true,
+            ChunkType::SilenceChunk => false,
+        }
     }
 }
 
@@ -35,7 +257,32 @@ impl AudioCapture {
             stream: None,
             tx: None,
             is_recording: Arc::new(Mutex::new(false)),
+            vad: Arc::new(Mutex::new(VoiceActivityDetector::default())),
         }
+    }
+
+    pub fn stop_recording(&mut self) -> Result<(), Box<dyn std::error::Error>> {
+        // Set recording flag to false
+        *self.is_recording.lock().unwrap() = false;
+        
+        // Flush any remaining audio from VAD
+        if let Ok(mut vad_guard) = self.vad.lock() {
+            if let Some(final_chunk) = vad_guard.flush() {
+                if let Some(ref tx) = self.tx {
+                    eprintln!("Sending final VAD chunk: {} samples, type: {:?}", 
+                             final_chunk.data.len(), final_chunk.chunk_type);
+                    let _ = tx.send(final_chunk);
+                }
+            }
+        }
+        
+        // Stop and drop the stream
+        if let Some(stream) = self.stream.take() {
+            drop(stream);
+        }
+        
+        self.tx = None;
+        Ok(())
     }
 
     pub fn start_capture(&mut self) -> Result<mpsc::Receiver<AudioChunk>, Box<dyn std::error::Error + Send + Sync>> {
@@ -51,6 +298,12 @@ impl AudioCapture {
         let sample_rate = config.sample_rate().0;
         DebugLogger::log_info(&format!("Audio config: sample_rate={}Hz, channels={}, format={:?}", 
             sample_rate, config.channels(), config.sample_format()));
+        
+        // Initialize VAD with correct sample rate
+        if let Ok(mut vad_guard) = self.vad.lock() {
+            *vad_guard = VoiceActivityDetector::new(sample_rate);
+        }
+        DebugLogger::log_info(&format!("VAD initialized with sample rate: {}Hz", sample_rate));
         
         // Create a channel for sending audio chunks
         let (tx, rx) = mpsc::channel(); // Synchronous unbounded channel
@@ -96,19 +349,18 @@ impl AudioCapture {
         f32: FromSample<T>,
     {
         let channels = config.channels as usize;
-        let chunk_duration_ms = 2000; // 2 seconds per chunk
-        let chunk_size = (sample_rate as f32 * chunk_duration_ms as f32 / 1000.0) as usize;
-        DebugLogger::log_info(&format!("Audio stream config: channels={}, chunk_duration={}ms, chunk_size={} samples", 
-            channels, chunk_duration_ms, chunk_size));
+        DebugLogger::log_info(&format!("Audio stream config: channels={}, sample_rate={}Hz", 
+            channels, sample_rate));
         
-        let chunk_buffer = Arc::new(Mutex::new(Vec::<f32>::with_capacity(chunk_size * 2)));
+        // Use the VAD from self
+        let vad = self.vad.clone();
         let is_recording = self.is_recording.clone();
         
         let stream = device.build_input_stream(
             config,
             {
                 let tx = tx.clone();
-                let chunk_buffer = chunk_buffer.clone();
+                let vad = vad.clone();
                 let is_recording = is_recording.clone();
                 
                 move |data: &[T], _: &cpal::InputCallbackInfo| {
@@ -130,34 +382,23 @@ impl AudioCapture {
                         eprintln!("Audio callback #{}: received {} samples", count + 1, samples.len());
                     }
                     
-                    // Add to chunk buffer
-                    let mut should_send = false;
-                    let mut chunk_to_send = AudioChunk {
-                        data: Vec::new(),
-                        sample_rate,
-                    };
-                    
-                    if let Ok(mut buffer) = chunk_buffer.lock() {
-                        buffer.extend_from_slice(&samples);
+                    // Process audio through VAD
+                    if let Ok(mut vad_guard) = vad.lock() {
+                        let completed_chunks = vad_guard.process_audio(&samples);
                         
-                        // When we have enough audio data, send it
-                        if buffer.len() >= chunk_size {
-                            chunk_to_send.data = buffer.clone();
-                            buffer.clear();
-                            should_send = true;
-                        }
-                    }
-                    
-                    if should_send && !chunk_to_send.data.is_empty() {
-                        // Send chunk synchronously using try_send to avoid blocking the audio thread
-                        eprintln!("Preparing to send audio chunk: {} samples", chunk_to_send.data.len());
-                        match tx.send(chunk_to_send) {
-                            Ok(_) => {
-                                eprintln!("Audio chunk sent successfully");
-                            },
-                            Err(e) => {
-                                let error_msg = format!("Failed to send audio chunk: {}", e);
-                                eprintln!("{}", error_msg);
+                        // Send any completed chunks
+                        for chunk in completed_chunks {
+                            eprintln!("VAD produced chunk: {} samples, type: {:?}, duration: {}ms", 
+                                     chunk.data.len(), chunk.chunk_type, chunk.duration_ms);
+                            
+                            match tx.send(chunk) {
+                                Ok(_) => {
+                                    eprintln!("VAD chunk sent successfully");
+                                },
+                                Err(e) => {
+                                    let error_msg = format!("Failed to send VAD chunk: {}", e);
+                                    eprintln!("{}", error_msg);
+                                }
                             }
                         }
                     }

@@ -197,6 +197,7 @@ async fn start_recording(
     spoken_language: String,
     translation_language: String,
     api_endpoint: String,
+    stt_model: String,
     auto_mute: bool,
     translation_enabled: bool
 ) -> Result<(), String> {
@@ -210,8 +211,8 @@ async fn start_recording(
 
     // Get API key (use default AppSettings instance for the method)
     DebugLogger::log_info("=== PIPELINE START: start_recording() called ===");
-    DebugLogger::log_info(&format!("Recording params: spoken_lang={}, translation_lang={}, endpoint={}, auto_mute={}, translation_enabled={}", 
-        spoken_language, translation_language, api_endpoint, auto_mute, translation_enabled));
+    DebugLogger::log_info(&format!("Recording params: spoken_lang={}, translation_lang={}, endpoint={}, stt_model={}, auto_mute={}, translation_enabled={}", 
+        spoken_language, translation_language, api_endpoint, stt_model, auto_mute, translation_enabled));
     
     let settings_for_api = AppSettings::default();
     let api_key = settings_for_api.get_api_key(&app).map_err(|e| {
@@ -229,6 +230,7 @@ async fn start_recording(
         theme: "auto".to_string(), // Not used in recording
         auto_save: true, // Not used in recording
         api_endpoint,
+        stt_model,
         hotkeys: crate::settings::Hotkeys {
             push_to_talk: "".to_string(), // Not used in recording
             hands_free: "".to_string(), // Not used in recording
@@ -260,8 +262,8 @@ async fn start_recording(
     
     // Create services with API key
     DebugLogger::log_info("Creating STT service");
-    let stt_service = STTService::new(settings.api_endpoint.clone(), api_key.clone());
-    DebugLogger::log_info(&format!("STT service created with endpoint: {}", settings.api_endpoint));
+    let stt_service = STTService::new(settings.api_endpoint.clone(), api_key.clone(), settings.stt_model.clone());
+    DebugLogger::log_info(&format!("STT service created with endpoint: {} and model: {}", settings.api_endpoint, settings.stt_model));
     
     let translation_service = if settings.translation_enabled && settings.translation_language != "none" {
         DebugLogger::log_info("Creating translation service (translation enabled)");
@@ -773,6 +775,7 @@ async fn save_settings_from_frontend(
     theme: String,
     api_endpoint: String,
     api_key: String,
+    stt_model: String,
     auto_mute: bool,
     translation_enabled: bool,
     debug_logging: bool,
@@ -780,8 +783,8 @@ async fn save_settings_from_frontend(
     hands_free_hotkey: String
 ) -> Result<(), String> {
     // Log the settings being saved (without logging the API key for security)
-    DebugLogger::log_info(&format!("SETTINGS_SAVE: spoken_language={}, translation_language={}, audio_device={}, theme={}, api_endpoint={}, api_key_provided={}, auto_mute={}, translation_enabled={}, debug_logging={}, push_to_talk={}, hands_free={}", 
-        spoken_language, translation_language, audio_device, theme, api_endpoint, !api_key.is_empty(), auto_mute, translation_enabled, debug_logging, push_to_talk_hotkey, hands_free_hotkey));
+    DebugLogger::log_info(&format!("SETTINGS_SAVE: spoken_language={}, translation_language={}, audio_device={}, theme={}, api_endpoint={}, stt_model={}, api_key_provided={}, auto_mute={}, translation_enabled={}, debug_logging={}, push_to_talk={}, hands_free={}", 
+        spoken_language, translation_language, audio_device, theme, api_endpoint, stt_model, !api_key.is_empty(), auto_mute, translation_enabled, debug_logging, push_to_talk_hotkey, hands_free_hotkey));
 
     // Store API key securely if provided and not empty
     // (Note: we now send empty string for security, so API key is stored separately via store_api_key command)
@@ -851,6 +854,7 @@ pub fn run() {
                 let stop_recording = MenuItemBuilder::with_id("stop_recording", "Stop Recording").enabled(false).build(app)?;
                 
                 let preferences = MenuItemBuilder::with_id("preferences", "Preferences").build(app)?;
+                let api_settings = MenuItemBuilder::with_id("api_settings", "API Settings").build(app)?;
                 let language_settings = MenuItemBuilder::with_id("language_settings", "Language Settings").build(app)?;
                 let audio_settings = MenuItemBuilder::with_id("audio_settings", "Audio Settings").build(app)?;
                 let about = MenuItemBuilder::with_id("about", "About TalkToMe").build(app)?;
@@ -862,6 +866,7 @@ pub fn run() {
                         &start_recording,
                         &stop_recording,
                         &preferences,
+                        &api_settings,
                         &language_settings, 
                         &audio_settings,
                         &about,
@@ -900,6 +905,13 @@ pub fn run() {
                                 let _ = window.show();
                                 let _ = window.set_focus();
                                 let _ = window.emit("show-preferences", ());
+                            }
+                        }
+                        "api_settings" => {
+                            if let Some(window) = app.get_webview_window("main") {
+                                let _ = window.show();
+                                let _ = window.set_focus();
+                                let _ = window.emit("show-api-settings", ());
                             }
                         }
                         "language_settings" => {
