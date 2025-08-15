@@ -25,6 +25,9 @@ impl STTService {
 
     /// Transcribe audio chunk with enhanced error handling
     pub async fn transcribe_chunk(&self, audio_data: Vec<f32>, sample_rate: u32) -> Result<String, String> {
+        DebugLogger::log_info("=== STT: transcribe_chunk() called ===");
+        DebugLogger::log_info(&format!("STT: Input audio_data.len()={}, sample_rate={}", audio_data.len(), sample_rate));
+        
         if audio_data.is_empty() {
             DebugLogger::log_pipeline_error("stt", "Empty audio data provided");
             return Err("Empty audio data".to_string());
@@ -32,21 +35,26 @@ impl STTService {
 
         // Check for audio quality - skip if too quiet
         let max_amplitude = audio_data.iter().map(|&x| x.abs()).fold(0.0, f32::max);
+        DebugLogger::log_info(&format!("STT: Audio quality check - max_amplitude={:.6}, threshold=0.01", max_amplitude));
         if max_amplitude < 0.01 {
             DebugLogger::log_info(&format!("Audio chunk too quiet (max_amplitude: {:.6}), returning empty", max_amplitude));
             return Ok(String::new()); // Return empty string for silent audio
         }
 
         // Convert f32 samples to i16 for WAV encoding
+        DebugLogger::log_info("STT: Converting audio to WAV format");
         let audio_bytes = self.encode_wav(&audio_data, sample_rate)
             .map_err(|e| {
                 let error_msg = format!("Audio encoding error: {}", e);
                 DebugLogger::log_pipeline_error("stt", &error_msg);
                 error_msg
             })?;
+        DebugLogger::log_info(&format!("STT: WAV encoding complete, output size={} bytes", audio_bytes.len()));
 
         // Skip very small audio files (less than 1 second)
-        if audio_bytes.len() < (sample_rate * 2) as usize {
+        let min_size = (sample_rate * 2) as usize; // 1 second of 16-bit audio
+        DebugLogger::log_info(&format!("STT: Size check - audio_bytes.len()={}, min_size={}", audio_bytes.len(), min_size));
+        if audio_bytes.len() < min_size {
             DebugLogger::log_info(&format!("Audio chunk too small ({} bytes), skipping", audio_bytes.len()));
             return Ok(String::new());
         }
@@ -59,11 +67,14 @@ impl STTService {
     async fn send_transcription_request(&self, audio_bytes: Vec<u8>) -> Result<String, String> {
         // Send request to Whisper API with retries
         let url = format!("{}/audio/transcriptions", self.api_endpoint);
+        DebugLogger::log_info(&format!("STT: Preparing request to URL: {}", url));
+        DebugLogger::log_info(&format!("STT: Audio payload size: {} bytes", audio_bytes.len()));
         
         for attempt in 1..=3 {
             DebugLogger::log_info(&format!("STT attempt {}/3 to {}", attempt, url));
             
             // Create multipart form data fresh for each attempt
+            DebugLogger::log_info("STT: Creating multipart form data");
             let form = reqwest::multipart::Form::new()
                 .text("model", "whisper-1")
                 .text("response_format", "json")
@@ -76,7 +87,9 @@ impl STTService {
                         DebugLogger::log_pipeline_error("stt", &error_msg);
                         error_msg
                     })?);
+            DebugLogger::log_info("STT: Multipart form created successfully");
 
+            DebugLogger::log_info("STT: Sending HTTP POST request");
             let response = self.client
                 .post(&url)
                 .header("Authorization", format!("Bearer {}", self.api_key))
@@ -88,8 +101,10 @@ impl STTService {
                 Ok(resp) => {
                     let status = resp.status();
                     DebugLogger::log_info(&format!("STT API response status: {}", status));
+                    DebugLogger::log_info(&format!("STT API response headers: {:?}", resp.headers()));
                     
                     if resp.status().is_success() {
+                        DebugLogger::log_info("STT: Response is successful, reading response text");
                         let response_text = resp.text().await
                             .map_err(|e| {
                                 let error_msg = format!("Failed to read response text: {}", e);
@@ -99,6 +114,7 @@ impl STTService {
                         
                         DebugLogger::log_info(&format!("STT API raw response: {}", response_text));
                         
+                        DebugLogger::log_info("STT: Parsing JSON response");
                         let json: Value = serde_json::from_str(&response_text)
                             .map_err(|e| {
                                 let error_msg = format!("JSON parsing error: {}", e);
@@ -106,15 +122,19 @@ impl STTService {
                                 error_msg
                             })?;
                         
+                        DebugLogger::log_info(&format!("STT: Parsed JSON: {}", serde_json::to_string_pretty(&json).unwrap_or_default()));
+                        
                         if let Some(text) = json["text"].as_str() {
                             DebugLogger::log_info(&format!("STT extracted text: '{}'", text));
                             return Ok(text.trim().to_string());
                         } else {
                             let error_msg = "No text in API response".to_string();
                             DebugLogger::log_pipeline_error("stt", &error_msg);
+                            DebugLogger::log_info(&format!("STT: Available JSON keys: {:?}", json.as_object().map(|o| o.keys().collect::<Vec<_>>())));
                             return Err(error_msg);
                         }
                     } else {
+                        DebugLogger::log_info("STT: Response status is not successful, reading error response");
                         let error_text = resp.text().await.unwrap_or_default();
                         DebugLogger::log_info(&format!("STT API error response: {}", error_text));
                         

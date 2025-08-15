@@ -63,6 +63,29 @@ function createSettingsStore() {
   const { subscribe, set, update } = writable(initialSettings);
 
   const store = { subscribe, set, update };
+  
+  // Load API key from backend if not present in localStorage
+  const loadApiKeyFromBackend = async () => {
+    try {
+      const currentSettings = get(store);
+      if (!currentSettings.apiKey || currentSettings.apiKey.trim() === '') {
+        const backendApiKey = await invoke('get_api_key') as string;
+        if (backendApiKey && backendApiKey.trim() !== '') {
+          update(settings => {
+            const newSettings = { ...settings, apiKey: backendApiKey };
+            localStorage.setItem('talktome-settings', JSON.stringify(newSettings));
+            return newSettings;
+          });
+        }
+      }
+    } catch (error) {
+      // API key not found in backend or other error - this is expected for new installations
+      console.log('No API key found in backend storage (this is normal for new installations)');
+    }
+  };
+  
+  // Load API key from backend on initialization
+  loadApiKeyFromBackend();
 
   // Create syncToBackend function that can be called by setters
   const syncToBackend = async () => {
@@ -75,6 +98,7 @@ function createSettingsStore() {
         audio_device: currentSettings.audioDevice,
         theme: currentSettings.theme,
         api_endpoint: currentSettings.apiEndpoint,
+        api_key: currentSettings.apiKey,
         auto_mute: currentSettings.autoMute,
         translation_enabled: currentSettings.translationLanguage !== 'none',
         debug_logging: currentSettings.debugLogging,

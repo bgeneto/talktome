@@ -209,8 +209,17 @@ async fn start_recording(
     }
 
     // Get API key (use default AppSettings instance for the method)
+    DebugLogger::log_info("=== PIPELINE START: start_recording() called ===");
+    DebugLogger::log_info(&format!("Recording params: spoken_lang={}, translation_lang={}, endpoint={}, auto_mute={}, translation_enabled={}", 
+        spoken_language, translation_language, api_endpoint, auto_mute, translation_enabled));
+    
     let settings_for_api = AppSettings::default();
-    let api_key = settings_for_api.get_api_key(&app).map_err(|e| e.to_string())?;
+    let api_key = settings_for_api.get_api_key(&app).map_err(|e| {
+        let error_msg = format!("Failed to get API key: {}", e);
+        DebugLogger::log_pipeline_error("settings", &error_msg);
+        error_msg
+    })?;
+    DebugLogger::log_info(&format!("API key obtained, length: {} chars", api_key.len()));
     
     // Create a settings struct for the processing pipeline
     let settings = AppSettings {
@@ -230,26 +239,43 @@ async fn start_recording(
     };
     
     // Create audio capture instance
+    DebugLogger::log_info("Creating AudioCapture instance");
     let mut audio_capture = AudioCapture::new();
     
     // Start capturing audio
-    let mut audio_rx = audio_capture.start_capture().map_err(|e| e.to_string())?;
+    DebugLogger::log_info("Starting audio capture");
+    let mut audio_rx = audio_capture.start_capture().map_err(|e| {
+        let error_msg = format!("Failed to start audio capture: {}", e);
+        DebugLogger::log_pipeline_error("audio_capture", &error_msg);
+        error_msg
+    })?;
+    DebugLogger::log_info("Audio capture started successfully");
     
     // Set recording state to true
     {
         let mut state = recording_state.inner().lock().map_err(|e| e.to_string())?;
         *state = true;
+        DebugLogger::log_info("Recording state set to true");
     }
     
     // Create services with API key
+    DebugLogger::log_info("Creating STT service");
     let stt_service = STTService::new(settings.api_endpoint.clone(), api_key.clone());
+    DebugLogger::log_info(&format!("STT service created with endpoint: {}", settings.api_endpoint));
+    
     let translation_service = if settings.translation_enabled && settings.translation_language != "none" {
+        DebugLogger::log_info("Creating translation service (translation enabled)");
         Some(TranslationService::new(settings.api_endpoint.clone(), api_key))
     } else {
         // Always create translation service for text correction
+        DebugLogger::log_info("Creating translation service (text correction only)");
         Some(TranslationService::new(settings.api_endpoint.clone(), api_key))
     };
+    DebugLogger::log_info("Translation service created");
+    
+    DebugLogger::log_info("Creating text insertion service");
     let text_insertion_service = TextInsertionService::new();
+    DebugLogger::log_info("Text insertion service created");
     
     // Clone values for the async task
     let app_clone = app.clone();
@@ -259,21 +285,31 @@ async fn start_recording(
     // Spawn task to process audio chunks
     tokio::spawn(async move {
         // Create system audio control inside the task for auto-mute if enabled
+        DebugLogger::log_info(&format!("Auto-mute setting: {}", auto_mute));
         let audio_control = if auto_mute {
+            DebugLogger::log_info("Attempting to create system audio control for auto-mute");
             match SystemAudioControl::new() {
                 Ok(control) => {
+                    DebugLogger::log_info("System audio control created successfully");
                     // Mute system audio
                     if let Err(e) = control.mute_system_audio() {
-                        eprintln!("Failed to mute system audio: {}", e);
+                        let error_msg = format!("Failed to mute system audio: {}", e);
+                        eprintln!("{}", error_msg);
+                        DebugLogger::log_pipeline_error("system_audio", &error_msg);
+                    } else {
+                        DebugLogger::log_info("System audio muted successfully");
                     }
                     Some(control)
                 },
                 Err(e) => {
-                    eprintln!("Failed to initialize system audio control: {}", e);
+                    let error_msg = format!("Failed to initialize system audio control: {}", e);
+                    eprintln!("{}", error_msg);
+                    DebugLogger::log_pipeline_error("system_audio", &error_msg);
                     None
                 }
             }
         } else {
+            DebugLogger::log_info("Auto-mute disabled, not creating system audio control");
             None
         };
         
@@ -284,9 +320,13 @@ async fn start_recording(
         let settings = settings;
         
         DebugLogger::log_info("Starting audio processing pipeline");
+        DebugLogger::log_info(&format!("Pipeline settings: translation_enabled={}, spoken_lang={}, target_lang={}", 
+            settings.translation_enabled, settings.spoken_language, settings.translation_language));
         
         // Process audio chunks
         while let Some(audio_chunk) = audio_rx.recv().await {
+            DebugLogger::log_info("=== NEW AUDIO CHUNK RECEIVED ===");
+            
             // Check if recording has been stopped
             {
                 let state = recording_state_clone.lock().unwrap();
@@ -308,16 +348,21 @@ async fn start_recording(
             }
             
             // Emit status to frontend
+            DebugLogger::log_info("Emitting processing-audio event to frontend");
             let _ = app.emit("processing-audio", true);
             
             // Transcribe audio chunk
+            DebugLogger::log_info("=== STARTING STT TRANSCRIPTION ===");
             match stt_service.transcribe_chunk(audio_chunk.data, audio_chunk.sample_rate).await {
                 Ok(transcribed_text) => {
                     DebugLogger::log_transcription_response(true, Some(&transcribed_text), None);
+                    DebugLogger::log_info(&format!("=== STT SUCCESS: '{}' ===", transcribed_text));
                     
                     if !transcribed_text.trim().is_empty() {
+                        DebugLogger::log_info("=== STARTING TRANSLATION/CORRECTION ===");
                         // Always process text through translation service for correction/translation
                         let final_text = if let Some(ref translation_service) = translation_service {
+                            DebugLogger::log_info("Translation service available, processing text");
                             match translation_service.process_text(
                                 &transcribed_text,
                                 &settings.spoken_language,
@@ -326,36 +371,44 @@ async fn start_recording(
                             ).await {
                                 Ok(processed_text) => {
                                     DebugLogger::log_translation_response(true, Some(&processed_text), None, None);
+                                    DebugLogger::log_info(&format!("=== TRANSLATION SUCCESS: '{}' ===", processed_text));
                                     processed_text
                                 },
                                 Err(e) => {
                                     DebugLogger::log_translation_response(false, None, Some(&e), None);
                                     DebugLogger::log_pipeline_error("translation", &e);
+                                    DebugLogger::log_info(&format!("=== TRANSLATION FAILED, USING FALLBACK: '{}' ===", transcribed_text));
                                     // Emit error to frontend
-                                    let _ = app.emit("processing-error", format!("Translation Error: {}", e));
+                                    let _ = app.emit("processing-error", format!("Translation Error - Using fallback: {}", e));
                                     transcribed_text.clone() // Fallback to original text
                                 }
                             }
                         } else {
-                            DebugLogger::log_info("No translation service, using original transcribed text");
+                            DebugLogger::log_info("No translation service available, using original transcribed text");
                             transcribed_text.clone()
                         };
                         
                         // Insert text into focused application
+                        DebugLogger::log_info("=== STARTING TEXT INSERTION ===");
                         match text_insertion_service.insert_text(&final_text) {
                             Ok(_) => {
                                 DebugLogger::log_text_insertion(&final_text, true, None);
+                                DebugLogger::log_info("=== TEXT INSERTION SUCCESS ===");
                             },
                             Err(e) => {
                                 DebugLogger::log_text_insertion(&final_text, false, Some(&e));
                                 DebugLogger::log_pipeline_error("text_insertion", &e);
+                                DebugLogger::log_info(&format!("=== TEXT INSERTION FAILED: {} ===", e));
                                 let _ = app.emit("processing-error", format!("Text insertion error: {}", e));
                             }
                         }
                         
                         // Emit success event to frontend with transcribed text
+                        DebugLogger::log_info("Emitting transcribed-text event to frontend");
                         let _ = app.emit("transcribed-text", &final_text);
+                        DebugLogger::log_info("Emitting processing-audio false event to frontend");
                         let _ = app.emit("processing-audio", false);
+                        DebugLogger::log_info("=== PIPELINE CHUNK COMPLETE ===");
                     } else {
                         DebugLogger::log_info("Transcribed text is empty, skipping processing");
                     }
@@ -363,6 +416,7 @@ async fn start_recording(
                 Err(e) => {
                     DebugLogger::log_transcription_response(false, None, Some(&e));
                     DebugLogger::log_pipeline_error("transcription", &e);
+                    DebugLogger::log_info(&format!("=== STT FAILED: {} ===", e));
                     let _ = app.emit("processing-error", format!("Transcription error: {}", e));
                     let _ = app.emit("processing-audio", false);
                 }
@@ -370,22 +424,35 @@ async fn start_recording(
         }
         
         // Clean up when recording stops
+        DebugLogger::log_info("=== PIPELINE CLEANUP STARTING ===");
         // Unmute system audio if it was muted
         if let Some(ref audio_control) = audio_control {
             if audio_control.is_muted() {
+                DebugLogger::log_info("Attempting to unmute system audio during cleanup");
                 if let Err(e) = audio_control.unmute_system_audio() {
-                    eprintln!("Failed to unmute system audio during cleanup: {}", e);
+                    let error_msg = format!("Failed to unmute system audio during cleanup: {}", e);
+                    eprintln!("{}", error_msg);
+                    DebugLogger::log_pipeline_error("system_audio_cleanup", &error_msg);
+                } else {
+                    DebugLogger::log_info("System audio unmuted successfully during cleanup");
                 }
+            } else {
+                DebugLogger::log_info("System audio was not muted, no cleanup needed");
             }
+        } else {
+            DebugLogger::log_info("No system audio control to clean up");
         }
         
         // Clean up recording state
         {
             let mut state = recording_state_clone.lock().unwrap();
             *state = false;
+            DebugLogger::log_info("Recording state set to false");
         }
         
+        DebugLogger::log_info("Emitting recording-stopped event to frontend");
         let _ = app.emit("recording-stopped", ());
+        DebugLogger::log_info("=== PIPELINE CLEANUP COMPLETE ===");
     });
     
     Ok(())
@@ -692,15 +759,23 @@ async fn save_settings_from_frontend(
     audio_device: String,
     theme: String,
     api_endpoint: String,
+    api_key: String,
     auto_mute: bool,
     translation_enabled: bool,
     debug_logging: bool,
     push_to_talk_hotkey: String,
     hands_free_hotkey: String
 ) -> Result<(), String> {
-    // Log the settings being saved
-    DebugLogger::log_info(&format!("SETTINGS_SAVE: spoken_language={}, translation_language={}, audio_device={}, theme={}, api_endpoint={}, auto_mute={}, translation_enabled={}, debug_logging={}, push_to_talk={}, hands_free={}", 
-        spoken_language, translation_language, audio_device, theme, api_endpoint, auto_mute, translation_enabled, debug_logging, push_to_talk_hotkey, hands_free_hotkey));
+    // Log the settings being saved (without logging the API key for security)
+    DebugLogger::log_info(&format!("SETTINGS_SAVE: spoken_language={}, translation_language={}, audio_device={}, theme={}, api_endpoint={}, api_key_length={}, auto_mute={}, translation_enabled={}, debug_logging={}, push_to_talk={}, hands_free={}", 
+        spoken_language, translation_language, audio_device, theme, api_endpoint, api_key.len(), auto_mute, translation_enabled, debug_logging, push_to_talk_hotkey, hands_free_hotkey));
+
+    // Store API key securely if provided
+    if !api_key.is_empty() {
+        let settings = AppSettings::default();
+        settings.store_api_key(&app, api_key)?;
+        DebugLogger::log_info("API key stored securely in backend");
+    }
 
     // Re-initialize debug logging with the new state
     DebugLogger::init_with_state(&app, debug_logging)?;
