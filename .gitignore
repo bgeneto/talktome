@@ -231,6 +231,7 @@ $RECYCLE.BIN/
 .nfs*
 
 # IDEs
+.crush/
 .idea/
 .vscode/settings.json
 .vscode/launch.json

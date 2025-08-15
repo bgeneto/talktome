@@ -5,12 +5,21 @@ use tauri::{
 };
 use tauri_plugin_global_shortcut::{Code, Modifiers, Shortcut, ShortcutState, GlobalShortcutExt};
 use std::collections::HashMap;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 mod settings;
 use settings::AppSettings;
+mod audio;
+use audio::AudioCapture;
+mod stt;
+use stt::STTService;
+mod translation;
+use translation::TranslationService;
+mod text_insertion;
+use text_insertion::TextInsertionService;
 
-// Global state to track registered hotkeys
+// Global state to track registered hotkeys and active recording
 type HotkeyRegistry = Mutex<HashMap<String, String>>;
+type RecordingState = Arc<Mutex<bool>>;
 
 // Learn more about Tauri commands at https://tauri.app/develop/calling-rust/
 #[tauri::command]
@@ -141,13 +150,23 @@ async fn register_hotkeys(
                     ShortcutState::Pressed => "pressed",
                     ShortcutState::Released => "released",
                 };
-                let _ = app_for_emit.emit(
-                    "hotkey-triggered",
-                    serde_json::json!({
-                        "action": action_clone,
-                        "state": state,
-                    }),
-                );
+                if action_clone == "push_to_talk" || action_clone == "hands_free" {
+                    if state == "pressed" {
+                        // Start recording - need to get recording_state somehow
+                        let _ = app_for_emit.emit("start-recording-from-hotkey", ());
+                    } else {
+                        // Stop recording
+                        let _ = app_for_emit.emit("stop-recording-from-hotkey", ());
+                    }
+                } else {
+                                    let _ = app_for_emit.emit(
+                                        "hotkey-triggered",
+                                        serde_json::json!({
+                                            "action": action_clone,
+                                            "state": state,
+                                        }),
+                                    );
+                                }
             })
             .map_err(|e| {
                 format!(
@@ -166,11 +185,237 @@ async fn register_hotkeys(
     Ok(())
 }
 
-// Command to handle recording state
+// Command to start recording
 #[tauri::command]
-fn toggle_recording(_app: tauri::AppHandle) -> Result<bool, String> {
-    // This will be connected to the frontend recording state
-    Ok(true)
+async fn start_recording(app: AppHandle, recording_state: State<'_, RecordingState>) -> Result<(), String> {
+    // Check if already recording
+    {
+        let state = recording_state.inner().lock().map_err(|e| e.to_string())?;
+        if *state {
+            return Err("Already recording".to_string());
+        }
+    }
+
+    // Load settings
+    let settings = AppSettings::load(&app).map_err(|e| e.to_string())?;
+    
+    // Create audio capture instance
+    let mut audio_capture = AudioCapture::new();
+    
+    // Start capturing audio
+    let mut audio_rx = audio_capture.start_capture().map_err(|e| e.to_string())?;
+    
+    // Set recording state to true
+    {
+        let mut state = recording_state.inner().lock().map_err(|e| e.to_string())?;
+        *state = true;
+    }
+    
+    // Create services
+    let stt_service = STTService::new(settings.api_endpoint.clone(), settings.api_key.clone());
+    let translation_service = if settings.translation_language != "none" {
+        Some(TranslationService::new(settings.api_endpoint.clone(), settings.api_key.clone()))
+    } else {
+        None
+    };
+    let text_insertion_service = TextInsertionService::new();
+    
+    // Clone app handle for the processing task
+    let app_clone = app.clone();
+    let recording_state_clone = recording_state.inner().clone();
+    
+    // Spawn task to process audio chunks
+    tokio::spawn(async move {
+        let stt_service = stt_service;
+        let translation_service = translation_service;
+        let text_insertion_service = text_insertion_service;
+        let app = app_clone;
+        let settings = settings;
+        
+        // Process audio chunks
+        while let Some(audio_chunk) = audio_rx.recv().await {
+            // Check if recording has been stopped
+            {
+                let state = recording_state_clone.lock().unwrap();
+                if !*state {
+                    break;
+                }
+            }
+            
+            // Skip empty chunks
+            if audio_chunk.is_empty() {
+                continue;
+            }
+            
+            // Transcribe audio chunk
+            match stt_service.transcribe_chunk(audio_chunk, 48000).await {
+                Ok(transcribed_text) => {
+                    if !transcribed_text.trim().is_empty() {
+                        // Translate text if needed
+                        let final_text = if let Some(ref translation_service) = translation_service {
+                            if settings.translation_language != "none" {
+                                match translation_service.translate_text(
+                                    &transcribed_text,
+                                    &settings.spoken_language,
+                                    &settings.translation_language
+                                ).await {
+                                    Ok(translated_text) => translated_text,
+                                    Err(e) => {
+                                        eprintln!("Translation error: {}", e);
+                                        transcribed_text.clone() // Fallback to original text
+                                    }
+                                }
+                            } else {
+                                transcribed_text.clone()
+                            }
+                        } else {
+                            transcribed_text.clone()
+                        };
+                        
+                        // Insert text into focused application
+                        if let Err(e) = text_insertion_service.insert_text(&final_text) {
+                            eprintln!("Text insertion error: {}", e);
+                        }
+                        
+                        // Emit event to frontend with transcribed text
+                        let _ = app.emit("transcribed-text", &final_text);
+                    }
+                }
+                Err(e) => {
+                    eprintln!("Transcription error: {}", e);
+                }
+            }
+        }
+        
+        // Clean up recording state
+        {
+            let mut state = recording_state_clone.lock().unwrap();
+            *state = false;
+        }
+    });
+    
+    Ok(())
+}
+
+// Command to stop recording
+#[tauri::command]
+fn stop_recording(recording_state: State<'_, RecordingState>) -> Result<(), String> {
+    let mut state = recording_state.inner().lock().map_err(|e| e.to_string())?;
+    *state = false;
+    Ok(())
+}
+
+// Command to test API connectivity
+#[tauri::command]
+async fn test_stt_api(endpoint: String, api_key: String) -> Result<bool, String> {
+    if endpoint.is_empty() {
+        return Err("API endpoint cannot be empty".to_string());
+    }
+    
+    if api_key.is_empty() {
+        return Err("API key cannot be empty".to_string());
+    }
+
+    let client = reqwest::Client::new();
+    
+    // Try to test the models endpoint first (common for OpenAI-compatible APIs)
+    let models_url = format!("{}/models", endpoint);
+    
+    match client
+        .get(&models_url)
+        .header("Authorization", format!("Bearer {}", api_key))
+        .timeout(std::time::Duration::from_secs(10))
+        .send()
+        .await
+    {
+        Ok(response) => {
+            if response.status().is_success() {
+                Ok(true)
+            } else if response.status() == 401 {
+                Err("Unauthorized: Invalid API key".to_string())
+            } else if response.status() == 404 {
+                // Models endpoint might not exist, try a simple health check or audio transcription endpoint
+                let transcription_url = format!("{}/audio/transcriptions", endpoint);
+                match client
+                    .head(&transcription_url)
+                    .header("Authorization", format!("Bearer {}", api_key))
+                    .timeout(std::time::Duration::from_secs(10))
+                    .send()
+                    .await
+                {
+                    Ok(resp) => {
+                        if resp.status().is_success() || resp.status() == 400 || resp.status() == 422 {
+                            // 400/422 is expected for HEAD request without proper audio data
+                            Ok(true)
+                        } else if resp.status() == 401 {
+                            Err("Unauthorized: Invalid API key".to_string())
+                        } else {
+                            Err(format!("API returned status code: {}", resp.status()))
+                        }
+                    }
+                    Err(e) => Err(format!("Network error: {}", e))
+                }
+            } else {
+                Err(format!("API returned status code: {}", response.status()))
+            }
+        }
+        Err(e) => {
+            if e.is_timeout() {
+                Err("Request timed out. Check your internet connection and API endpoint.".to_string())
+            } else if e.is_connect() {
+                Err("Cannot connect to API endpoint. Check the URL and your internet connection.".to_string())
+            } else {
+                Err(format!("Network error: {}", e))
+            }
+        }
+    }
+}
+
+// Command to validate settings
+#[tauri::command]
+async fn validate_settings(settings: serde_json::Value) -> Result<serde_json::Value, String> {
+    let mut errors = Vec::new();
+
+    // Validate API endpoint
+    if let Some(endpoint) = settings["apiEndpoint"].as_str() {
+        if endpoint.is_empty() {
+            errors.push("API endpoint cannot be empty".to_string());
+        } else if !endpoint.starts_with("http://") && !endpoint.starts_with("https://") {
+            errors.push("API endpoint must start with http:// or https://".to_string());
+        }
+    } else {
+        errors.push("API endpoint is required".to_string());
+    }
+
+    // Validate API key
+    if let Some(api_key) = settings["apiKey"].as_str() {
+        if api_key.is_empty() {
+            errors.push("API key cannot be empty".to_string());
+        } else if api_key.len() < 10 {
+            errors.push("API key seems too short".to_string());
+        }
+    } else {
+        errors.push("API key is required".to_string());
+    }
+
+    // Validate hotkeys
+    if let Some(hotkeys) = settings["hotkeys"].as_object() {
+        if let Some(push_to_talk) = hotkeys.get("pushToTalk").and_then(|v| v.as_str()) {
+            if push_to_talk.is_empty() {
+                errors.push("Push to talk hotkey cannot be empty".to_string());
+            }
+        }
+        if let Some(hands_free) = hotkeys.get("handsFree").and_then(|v| v.as_str()) {
+            if hands_free.is_empty() {
+                errors.push("Hands-free hotkey cannot be empty".to_string());
+            }
+        }
+    }
+
+    Ok(serde_json::json!({
+        "valid": errors.is_empty(),
+        "errors": errors
+    }))
 }
 
 // Command to show/hide main window
@@ -395,8 +640,9 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_global_shortcut::Builder::new().build())
-    .manage(Mutex::<HashMap<String, String>>::new(HashMap::new()))
-        .invoke_handler(tauri::generate_handler![greet, toggle_recording, toggle_window, quit_app, update_spoken_language, update_translation_language, update_audio_device, register_hotkeys])
+        .manage(Mutex::<HashMap<String, String>>::new(HashMap::new()))
+        .manage(Arc::new(Mutex::new(false)) as RecordingState)
+        .invoke_handler(tauri::generate_handler![greet, start_recording, stop_recording, toggle_window, quit_app, update_spoken_language, update_translation_language, update_audio_device, register_hotkeys, test_stt_api, validate_settings])
         .setup(|app| {
             // Load current settings
             let settings = AppSettings::load(&app.handle()).unwrap_or_default();

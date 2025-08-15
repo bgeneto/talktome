@@ -12,45 +12,23 @@ Vibe Compatibility: This SDD is written to be Vibe-compatible. You can copy-past
 
 #### **1.1 Purpose**
 
-To create a lightweight, privacy-first, cross-platform desktop application that allows users to dictate, edit, format, and optionally translate text using their voice. The application must run on Windows 10+ (64-bit) and modern Linux distributions (e.g., Ubuntu 20.04+, Fedora 35+, Arch), with intelligent audio management and seamless text insertion capabilities.
+To create a lightweight, cross-platform desktop application that allows users to dictate, transcribe and optionally translate text to be pasted in any input field using their voice. The application must run on Windows 10+ (64-bit), MacOS and modern Linux distributions (e.g., Ubuntu 20.04+, Fedora 35+, Arch), with intelligent audio management and seamless text insertion capabilities.
 
 #### **1.2 Scope**
 
-| In-Scope                                                     | Out-of-Scope                                      |
-| ------------------------------------------------------------ | ------------------------------------------------- |
-| • Real-time speech-to-text via OpenAI-compatible Whisper API | • MacOS and Mobile (iOS/Android) support (future) |
-| • **Live Translation**: Transcribe speech from a source language to a different target language via OpenAI-compatible chat completion endpoints. | • Multi-user collaboration (future)               |
-| • **Advanced Hotkeys**: Configurable global shortcuts for "Push to talk" and "Hands-free" modes. | • Local/offline transcription                     |
-| • **Multi-language Dictation**: User can select the language(s) for transcription. | • Custom voice models                             |
-| • **Smart Audio Management**: Auto-mute music/media during dictation (configurable) | • Video transcription                             |
-| • **Universal Text Insertion**: Insert transcribed/translated text into any active text input | • Browser extension integration                   |
-| • **Rich System Tray**: Right-click menu with microphone selection, language switching, and settings access |                                                   |
-|                                                              |                                                   |
-| • Light/Dark theming with runtime toggle                     |                                                   |
-| • Settings persistence (JSON in app-data)                    |                                                   |
-|                                                              |                                                   |
-
-#### **1.3 Intended Audience**
-
-| Role                         | Reason                                                       |
-| ---------------------------- | ------------------------------------------------------------ |
-| **Developers (Rust, JS/TS)** | Primary readers – implement the design.                      |
-| **Product Owner / PM**       | Verify that functional & non-functional requirements are covered. |
-| **QA / Test Engineers**      | Build test cases from the functional spec.                   |
-| **Security Auditor**         | Review privacy, data-flow, API key handling, and permission model. |
-
-#### **1.4 Definitions & Acronyms**
-
-| Acronym      | Definition                                                   |
-| ------------ | ------------------------------------------------------------ |
-| **Tauri**    | Rust-based desktop runtime that wraps a native WebView.      |
-| **Svelte**   | Reactive UI framework that compiles to vanilla JS.           |
-| **Tailwind** | Utility-first CSS framework.                                 |
-| **STT**      | Speech-to-Text (Whisper API endpoint).                       |
-| **LLM**      | Large Language Model (chat/completions endpoint for translation). |
-| **Vibe**     | Prompt-driven "code-as-you-type" environment that lets LLMs generate code from high-level spec. |
-| ****         |                                                              |
-| **AppData**  | Platform-specific folder (`%APPDATA%/talktome` on Windows, `$XDG_DATA_HOME/talktome` on Linux). |
+| In-Scope                                                     | Out-of-Scope                            |
+| ------------------------------------------------------------ | --------------------------------------- |
+| • Real-time speech-to-text via OpenAI-compatible Whisper API | • Mobile (iOS/Android) support (future) |
+| • **Live Translation**: Transcribe speech from a source language to a different target language via OpenAI-compatible chat completion endpoints. | • Multi-user collaboration (future)     |
+| • **Advanced Hotkeys**: Configurable global shortcuts for "Push to talk" and "Hands-free" modes. | • Local/offline transcription           |
+| • **Multi-language Dictation**: User can select the language(s) for transcription. | • Custom voice models                   |
+| • **Smart Audio Management**: Auto-mute music/media during dictation (configurable) | • Video transcription                   |
+| • **Universal Text Insertion**: Insert transcribed/translated text into any active text input | • Browser extension integration         |
+| • **Rich System Tray**: Right-click menu with microphone selection, language switching, and settings access |                                         |
+|                                                              |                                         |
+| • Light/Dark theming with runtime toggle                     |                                         |
+| • Settings persistence (JSON in app-data) and encryption     |                                         |
+|                                                              |                                         |
 
 ------
 
@@ -58,7 +36,7 @@ To create a lightweight, privacy-first, cross-platform desktop application that 
 
 #### **2.1 System Context**
 
-The application is a standalone desktop utility with intelligent system integration. The UI, built with Svelte, runs in a Tauri-managed WebView. All heavy lifting—audio capture, transcription via OpenAI-compatible APIs, hotkey monitoring, system audio control, text insertion, and system tray management—is handled by the Rust core, exposed to the frontend via Tauri commands.
+The application is a standalone desktop utility with intelligent system integration. The UI, built with Svelte, runs in a Tauri 2.0 managed WebView. All heavy lifting—audio capture, transcription via OpenAI-compatible whisper APIs, hotkey monitoring, system audio control, text insertion, and system tray management—is handled by the Rust core, exposed to the frontend via Tauri 2.0 commands.
 
 ```
 graph TD
@@ -128,7 +106,6 @@ graph TD
 | **Translation Service**    | Rust (reqwest) | Sends transcribed text to OpenAI-compatible chat/completions endpoint for translation. |
 | **Text Insertion Service** | Rust           | Platform-specific text insertion into active applications using clipboard and key simulation. |
 | **System Tray Manager**    | Rust           | Manages system tray icon, context menu, and associated actions. |
-| **Command Processor**      | Rust           | Parses voice commands and translates them into structured edit operations. |
 | **Persistence**            | Rust (serde)   | Saves/loads `settings.json` and manages secure API key storage using `tauri-plugin-stronghold`. |
 |                            |                |                                                              |
 
@@ -155,7 +132,7 @@ graph TD
 | ---------- | ---------- | ------------------------------------------------------------ | ------------------------------------------------------------ |
 | **FR-001** | User       | Start dictating by holding down a global hotkey ("Push to talk"). | can quickly dictate short phrases while in any application.  |
 | **FR-002** | User       | Toggle dictation on and off by pressing a global hotkey ("Hands-free"). | can dictate long-form content without holding a key.         |
-| **FR-003** | User       | Configure separate keyboard shortcuts for "Push to talk", "Hands-free", and "Emergency stop" modes in the settings. | can customize the controls to my preference and avoid conflicts. |
+| **FR-003** | User       | Configure separate keyboard shortcuts for "Push to talk", "Hands-free"  modes in the settings. | can customize the controls to my preference and avoid conflicts. |
 | **FR-004** | User       | Select my spoken language from a list in the settings.       | get accurate transcription for my native language or the language I'm using. |
 | **FR-005** | User       | Enable a "Live Translation" mode with source and target language selection. | can speak in one language and see the text appear in another. |
 | **FR-006** | User       | Configure OpenAI-compatible API endpoints and securely store my API key. | can use my preferred speech and translation services while keeping my credentials safe. |
@@ -179,9 +156,9 @@ graph TD
 | Category                         | Requirement                                                  |
 | -------------------------------- | ------------------------------------------------------------ |
 | **Performance**                  | Total latency (speech-to-translated-text) should be under 2000ms for good UX. Local audio processing latency ≤ 100ms. Text insertion latency ≤ 50ms. |
-| **Security & Privacy**           | When Privacy Mode is ON, no network activity occurs. API keys must be stored using `tauri-plugin-stronghold`. Audio data is never stored permanently. |
+| **Security & Privacy**           | API keys must be stored using `tauri-plugin-stronghold`. Audio data is never stored permanently. |
 | **Reliability**                  | The application must gracefully handle API errors (invalid key, network issues, rate limits) by showing notifications and falling back to previous text. Audio control failures should not crash the app. |
-| **Usability**                    | The distinction between dictation, translation, and command modes must be clear through visual indicators. System tray menu should be intuitive and responsive. Settings should be well-organized and searchable. |
+| **Usability**                    | System tray menu should be intuitive and responsive. Settings should be well-organized and searchable. |
 | **Accessibility**                | The app should work with screen readers. Keyboard navigation should be fully supported. High contrast modes should be respected. |
 | **Cross-Platform Compatibility** | Audio management features must work on both Windows (WASAPI) and Linux (PulseAudio/PipeWire). Text insertion must work with all major applications on both platforms. |
 | **Resource Usage**               | Memory usage should stay under 150MB during normal operation. CPU usage should be minimal when idle. Audio processing should not introduce audible latency. |
@@ -239,7 +216,7 @@ TalkToMe (Tray Icon)
 │   ├── 🇫🇷 French
 │   ├── 🇩🇪 German
 │   ├── ─────────────────
-│   └── ❌ Disable Translation
+│   └── ❌ None (disable Translation)
 ├── ─────────────────────
 └── Quit TalkToMe
 ```
@@ -251,7 +228,7 @@ TalkToMe (Tray Icon)
 #### **9.1 Sprint Breakdown (Enhanced)**
 
 - **Sprint 1:** Project Scaffolding & Basic UI
-  - Set up Tauri + Svelte + Tailwind project structure
+  - Set up Tauri 2.0 + Svelte + Tailwind project structure
   - Create basic main window and settings modal
   - Implement theme switching and settings persistence
 - **Sprint 2:** Audio Foundation & System Integration

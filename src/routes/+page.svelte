@@ -11,7 +11,6 @@
   let selectedSourceLang = 'auto';
   let selectedTargetLang = 'en';
   let isTranslating = false;
-  let recognition: any;
   let audioLevel = 0;
   let isListening = false;
   let showNotification = false;
@@ -19,16 +18,57 @@
   let microphoneStream: MediaStream | null = null;
   let audioContext: AudioContext | null = null;
   let analyzer: AnalyserNode | null = null;
+  let useWebSpeechAPI = false;
 
-  function showTrayNotification(message: string) {
-    notificationMessage = message;
-    showNotification = true;
-    setTimeout(() => {
-      showNotification = false;
-    }, 3000);
-  }
+  let recognition: any = null;
+  
+    function showTrayNotification(message: string) {
+      notificationMessage = message;
+      showNotification = true;
+      setTimeout(() => {
+        showNotification = false;
+      }, 3000);
+    }
+  
+    function initWebSpeechAPI() {
+      if ('webkitSpeechRecognition' in window || 'SpeechRecognition' in window) {
+        const SpeechRecognition = (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
+        recognition = new SpeechRecognition();
+        recognition.continuous = true;
+        recognition.interimResults = true;
+        recognition.lang = selectedSourceLang === 'auto' ? 'en-US' : selectedSourceLang;
+  
+        recognition.onresult = (event: any) => {
+          let finalTranscript = '';
+          for (let i = event.resultIndex; i < event.results.length; i++) {
+            if (event.results[i].isFinal) {
+              finalTranscript += event.results[i][0].transcript;
+            }
+          }
+          if (finalTranscript) {
+            transcribedText = finalTranscript;
+            translateText(finalTranscript);
+          }
+        };
+  
+        recognition.onerror = (event: any) => {
+          console.error('Speech recognition error:', event.error);
+          stopRecording();
+        };
+  
+        recognition.onend = () => {
+          isListening = false;
+          if (isRecording) {
+            recognition.start(); // Restart if still recording
+          }
+        };
+        
+        return recognition;
+      }
+      return null;
+    }
 
-  const languages = [
+  let languages = [
     { code: 'auto', name: 'Auto Detect' },
     { code: 'en', name: 'English' },
     { code: 'es', name: 'Spanish' },
@@ -41,118 +81,128 @@
     { code: 'ko', name: 'Korean' },
     { code: 'zh', name: 'Chinese' }
   ];
-
-  onMount(() => {
-    // Initialize speech recognition
-    if ('webkitSpeechRecognition' in window || 'SpeechRecognition' in window) {
-      const SpeechRecognition = (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
-      recognition = new SpeechRecognition();
-      recognition.continuous = true;
-      recognition.interimResults = true;
-      recognition.lang = selectedSourceLang === 'auto' ? 'en-US' : selectedSourceLang;
-
-      recognition.onresult = (event: any) => {
-        let finalTranscript = '';
-        for (let i = event.resultIndex; i < event.results.length; i++) {
-          if (event.results[i].isFinal) {
-            finalTranscript += event.results[i][0].transcript;
-          }
-        }
-        if (finalTranscript) {
-          transcribedText = finalTranscript;
-          translateText(finalTranscript);
-        }
-      };
-
-      recognition.onerror = (event: any) => {
-        console.error('Speech recognition error:', event.error);
-        stopRecording();
-      };
-
-      recognition.onend = () => {
-        isListening = false;
-        if (isRecording) {
-          recognition.start(); // Restart if still recording
-        }
-      };
-    }
     
-    // Listen for tray menu events
-    const unlistenSpokenLanguage = listen('tray-spoken-language-change', (event) => {
-      const language = event.payload as string;
-      settings.setSpokenLanguage(language);
-      selectedSourceLang = language;
-    });
-    
-    const unlistenTranslationLanguage = listen('tray-translation-language-change', (event) => {
-      const language = event.payload as string;
-      settings.setTranslationLanguage(language);
-      selectedTargetLang = language;
-    });
-    
-    const unlistenAudioDevice = listen('tray-audio-input-change', (event) => {
-      const device = event.payload as string;
-      settings.setAudioDevice(device);
-    });
+    onMount(async () => {
+        // Initialize speech recognition only if needed
+        // This will be done in startRecording function
+      
+        // Listen for tray menu events
+        const unlistenSpokenLanguage = await listen('tray-spoken-language-change', (event) => {
+            const language = event.payload as string;
+            settings.setSpokenLanguage(language);
+            selectedSourceLang = language;
+        });
+        
+        const unlistenTranslationLanguage = await listen('tray-translation-language-change', (event) => {
+            const language = event.payload as string;
+            settings.setTranslationLanguage(language);
+            selectedTargetLang = language;
+        });
+        
+        const unlistenAudioDevice = await listen('tray-audio-input-change', (event) => {
+            const device = event.payload as string;
+            settings.setAudioDevice(device);
+        });
 
-  // Register initial hotkeys (only pushToTalk and handsFree)
-  const currentSettings = get(settings);
-  invoke('register_hotkeys', { hotkeys: { pushToTalk: currentSettings.hotkeys.pushToTalk, handsFree: currentSettings.hotkeys.handsFree } })
-      .then(() => {
-    console.log('Hotkeys registered successfully:', { pushToTalk: currentSettings.hotkeys.pushToTalk, handsFree: currentSettings.hotkeys.handsFree });
-      })
-      .catch((error) => {
-        console.error('Failed to register hotkeys:', error);
-      });
-
-    // Listen for hotkey events
-    const unlistenHotkeyTriggered = listen('hotkey-triggered', (event) => {
-      const payload = event.payload as { action?: string; state?: string };
-      const action = payload?.action;
-      const state = payload?.state;
-      console.log('Hotkey triggered action:', action);
-
-      if ((action === 'pushToTalk' || action === 'handsFree') && (state === undefined || state === 'pressed')) {
-        if (!isRecording) {
-          startRecording();
-        } else {
-          stopRecording();
+        // Register initial hotkeys (only pushToTalk and handsFree)
+        const currentSettings = get(settings);
+        try {
+            await invoke('register_hotkeys', { hotkeys: { pushToTalk: currentSettings.hotkeys.pushToTalk, handsFree: currentSettings.hotkeys.handsFree } });
+            console.log('Hotkeys registered successfully:', { pushToTalk: currentSettings.hotkeys.pushToTalk, handsFree: currentSettings.hotkeys.handsFree });
+        } catch (error) {
+            console.error('Failed to register hotkeys:', error);
         }
-      }
+
+        // Listen for hotkey events
+        const unlistenHotkeyTriggered = await listen('hotkey-triggered', (event) => {
+            const payload = event.payload as { action?: string; state?: string };
+            const action = payload?.action;
+            const state = payload?.state;
+            console.log('Hotkey triggered action:', action);
+      
+            if ((action === 'pushToTalk' || action === 'handsFree') && (state === undefined || state === 'pressed')) {
+                if (!isRecording) {
+                    startRecording();
+                } else {
+                    stopRecording();
+                }
+            }
+        });
+        
+        // Listen for real-time transcription updates from Rust backend
+        const unlistenTranscriptionUpdate = await listen('transcription-update', (event) => {
+            const text = event.payload as string;
+            transcribedText = text;
+            translateText(text);
+        });
+        
+        // Listen for recording started event from tray
+        const unlistenTrayStartRecording = await listen('tray-start-recording', () => {
+            startRecording();
+        });
+        
+        // Listen for recording stopped event from tray
+        const unlistenTrayStopRecording = await listen('tray-stop-recording', () => {
+            stopRecording();
+        });
+          
+        return () => {
+            // Clean up event listeners
+            unlistenSpokenLanguage();
+            unlistenTranslationLanguage();
+            unlistenAudioDevice();
+            unlistenHotkeyTriggered();
+            unlistenTranscriptionUpdate();
+            unlistenTrayStartRecording();
+            unlistenTrayStopRecording();
+        };
     });
-  });
 
   async function startRecording() {
-    if (!recognition) {
-      alert('Speech recognition not supported in this browser');
-      return;
+      // Try to start recording with Rust backend services first
+      try {
+        await invoke('start_recording');
+        isRecording = true;
+        isListening = true;
+        transcribedText = '';
+        translatedText = '';
+        useWebSpeechAPI = false;
+      } catch (error) {
+        console.error('Failed to start recording with Rust backend:', error);
+        // Fallback to Web Speech API
+        const recognition = initWebSpeechAPI();
+        if (!recognition) {
+          alert('Speech recognition not supported in this browser');
+          return;
+        }
+        
+        try {
+          // Get microphone access for audio level monitoring
+          microphoneStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+          
+          // Set up audio context for level monitoring
+          audioContext = new ((window as any).AudioContext || (window as any).webkitAudioContext)();
+          const ctx = audioContext!;
+          const source = ctx.createMediaStreamSource(microphoneStream);
+          analyzer = ctx.createAnalyser();
+          analyzer.fftSize = 256;
+          source.connect(analyzer);
+          
+          // Start audio level monitoring
+          monitorAudioLevel();
+          
+          isRecording = true;
+          isListening = true;
+          transcribedText = '';
+          translatedText = '';
+          useWebSpeechAPI = true;
+          recognition.start();
+        } catch (error) {
+          console.error('Microphone access denied:', error);
+          alert('Microphone access is required for voice recording. Please allow microphone access and try again.');
+        }
+      }
     }
-    
-    try {
-      // Get microphone access for audio level monitoring
-      microphoneStream = await navigator.mediaDevices.getUserMedia({ audio: true });
-      
-      // Set up audio context for level monitoring
-  audioContext = new ((window as any).AudioContext || (window as any).webkitAudioContext)();
-  const ctx = audioContext!;
-  const source = ctx.createMediaStreamSource(microphoneStream);
-  analyzer = ctx.createAnalyser();
-      analyzer.fftSize = 256;
-      source.connect(analyzer);
-      
-      // Start audio level monitoring
-      monitorAudioLevel();
-      
-      isRecording = true;
-      isListening = true;
-      transcribedText = '';
-      translatedText = '';
-      recognition.start();
-    } catch (error) {
-      console.error('Microphone access denied:', error);
-      alert('Microphone access is required for voice recording. Please allow microphone access and try again.');
-    }
-  }
 
   function monitorAudioLevel() {
     if (!analyzer || !isRecording) return;
@@ -176,60 +226,83 @@
     updateLevel();
   }
 
-  function stopRecording() {
-    isRecording = false;
-    isListening = false;
-    audioLevel = 0;
-    
-    if (recognition) {
-      recognition.stop();
+  async function stopRecording() {
+      if (useWebSpeechAPI) {
+        isRecording = false;
+        isListening = false;
+        audioLevel = 0;
+        
+        if (recognition) {
+          recognition.stop();
+        }
+        
+        // Clean up audio resources
+        if (microphoneStream) {
+          microphoneStream.getTracks().forEach(track => track.stop());
+          microphoneStream = null;
+        }
+        
+        if (audioContext) {
+          audioContext.close();
+          audioContext = null;
+        }
+        
+        analyzer = null;
+      } else {
+        // Stop recording with Rust backend services
+        try {
+          await invoke('stop_recording');
+          isRecording = false;
+          isListening = false;
+          audioLevel = 0;
+        } catch (error) {
+          console.error('Failed to stop recording with Rust backend:', error);
+        }
+      }
     }
-    
-    // Clean up audio resources
-    if (microphoneStream) {
-      microphoneStream.getTracks().forEach(track => track.stop());
-      microphoneStream = null;
-    }
-    
-    if (audioContext) {
-      audioContext.close();
-      audioContext = null;
-    }
-    
-    analyzer = null;
-  }
 
   async function translateText(text: string) {
-    if (!text.trim() || selectedTargetLang === selectedSourceLang || selectedTargetLang === 'auto') return;
-    
-    isTranslating = true;
-    try {
-      // Use a free translation API (MyMemory API)
-      const sourceLang = selectedSourceLang === 'auto' ? 'en' : selectedSourceLang;
-      const targetLang = selectedTargetLang;
+      if (!text.trim() || selectedTargetLang === selectedSourceLang || selectedTargetLang === 'auto') return;
       
-      const response = await fetch(
-        `https://api.mymemory.translated.net/get?q=${encodeURIComponent(text)}&langpair=${sourceLang}|${targetLang}`
-      );
-      
-      if (response.ok) {
-        const data = await response.json();
-        if (data.responseStatus === 200) {
-          translatedText = data.responseData.translatedText;
-        } else {
-          throw new Error('Translation failed');
+      isTranslating = true;
+      try {
+        // Try to use Rust backend translation service first
+        const result = await invoke('translate_text', {
+          text: text,
+          sourceLang: selectedSourceLang,
+          targetLang: selectedTargetLang
+        });
+        translatedText = result as string;
+      } catch (error) {
+        console.error('Translation error with Rust backend:', error);
+        // Fallback to free translation API (MyMemory API)
+        try {
+          const sourceLang = selectedSourceLang === 'auto' ? 'en' : selectedSourceLang;
+          const targetLang = selectedTargetLang;
+          
+          const response = await fetch(
+            `https://api.mymemory.translated.net/get?q=${encodeURIComponent(text)}&langpair=${sourceLang}|${targetLang}`
+          );
+          
+          if (response.ok) {
+            const data = await response.json();
+            if (data.responseStatus === 200) {
+              translatedText = data.responseData.translatedText;
+            } else {
+              throw new Error('Translation failed');
+            }
+          } else {
+            throw new Error('Network error');
+          }
+        } catch (fallbackError) {
+          console.error('Translation error with fallback API:', fallbackError);
+          // Fallback to placeholder translation
+          translatedText = `[Translation Error - Using fallback]: ${text}`;
         }
-      } else {
-        throw new Error('Network error');
+      } finally {
+        isTranslating = false;
       }
-    } catch (error) {
-      console.error('Translation error:', error);
-      // Fallback to placeholder translation
-      translatedText = `[Translation Error - Using fallback]: ${text}`;
-    } finally {
-      isTranslating = false;
     }
-  }
 
   function clearText() {
     transcribedText = '';
@@ -284,34 +357,6 @@
             <div class="absolute inset-0 rounded-full bg-red-500 opacity-30 animate-ping"></div>
           {/if}
         </button>
-      </div>
-
-      <!-- Language Selection -->
-      <div class="flex flex-col sm:flex-row gap-4 mb-6">
-        <div class="flex-1">
-          <label for="source-lang" class="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">Source Language</label>
-          <select 
-            id="source-lang" 
-            bind:value={selectedSourceLang}
-            class="w-full px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-md shadow-sm focus:outline-none focus:ring-blue-500 focus:border-blue-500 dark:bg-gray-700 dark:text-white"
-          >
-            {#each languages as lang}
-              <option value={lang.code}>{lang.name}</option>
-            {/each}
-          </select>
-        </div>
-        <div class="flex-1">
-          <label for="target-lang" class="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">Target Language</label>
-          <select 
-            id="target-lang" 
-            bind:value={selectedTargetLang}
-            class="w-full px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-md shadow-sm focus:outline-none focus:ring-blue-500 focus:border-blue-500 dark:bg-gray-700 dark:text-white"
-          >
-            {#each languages.filter(l => l.code !== 'auto') as lang}
-              <option value={lang.code}>{lang.name}</option>
-            {/each}
-          </select>
-        </div>
       </div>
 
       <!-- Status Indicator -->

@@ -1,4 +1,4 @@
-import { writable } from 'svelte/store';
+import { writable, get } from 'svelte/store';
 import { invoke } from '@tauri-apps/api/core';
 
 interface Settings {
@@ -29,7 +29,7 @@ const defaultSettings: Settings = {
   },
   autoMute: true,
   quickAccessLanguages: [],
-};
+  };
 
 function createSettingsStore() {
   let initialSettings: Settings;
@@ -119,6 +119,58 @@ function createSettingsStore() {
         });
         return newSettings;
       });
+    },
+    
+    async testApiConnectivity(endpoint?: string, apiKey?: string): Promise<{ success: boolean; message: string; details?: string }> {
+      try {
+        // Use provided parameters or fall back to current settings
+        const currentSettings = get(settings);
+        const testEndpoint = endpoint || currentSettings.apiEndpoint;
+        const testApiKey = apiKey || currentSettings.apiKey;
+        
+        // Test STT API connectivity
+        const sttResult = await invoke('test_stt_api', {
+          endpoint: testEndpoint,
+          apiKey: testApiKey
+        });
+        return { success: true, message: 'API connectivity test passed!' };
+      } catch (error) {
+        console.error('API connectivity test failed:', error);
+        
+        // If error is a string (from Rust), use it directly
+        if (typeof error === 'string') {
+          // Extract main message and details if available
+          const parts = error.split(': ');
+          if (parts.length > 1) {
+            return { 
+              success: false, 
+              message: parts[0],
+              details: parts.slice(1).join(': ')
+            };
+          } else {
+            return { success: false, message: error };
+          }
+        }
+        
+        // Fallback for unknown error types
+        return { 
+          success: false, 
+          message: 'API connectivity test failed. Please check your API endpoint and key.'
+        };
+      }
+    },
+    
+    async validateSettings(): Promise<{ valid: boolean; errors: string[] }> {
+      try {
+        const currentSettings = get(settings);
+        const result = await invoke('validate_settings', {
+          settings: currentSettings
+        });
+        return result as { valid: boolean; errors: string[] };
+      } catch (error) {
+        console.error('Settings validation failed:', error);
+        return { valid: false, errors: ['Failed to validate settings'] };
+      }
     }
   };
 }

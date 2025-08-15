@@ -16,6 +16,9 @@
 
   let saveSuccess = false;
   let isSaving = false;
+  let isTestingApi = false;
+  let apiTestResult: { success: boolean; message: string; details?: string } | null = null;
+  let saveError: string | null = null;
 
   onMount(() => {
     // Subscribe to settings changes
@@ -116,25 +119,52 @@
 function savePreferences() {
     if (isSaving) return;
     isSaving = true;
+    saveError = null;
+    saveSuccess = false;
 
-    // Persist all settings at once and apply theme immediately
-    persistSettings(currentSettings);
-    applyTheme(currentSettings.theme as 'auto' | 'light' | 'dark');
-
-    // Update hotkeys in the backend
-    if (currentSettings.hotkeys) {
-      const { pushToTalk, handsFree } = currentSettings.hotkeys;
-      settings.updateHotkeys({ pushToTalk, handsFree });
+    // Validate required fields
+    if (!currentSettings.apiEndpoint.trim()) {
+      saveError = 'API endpoint is required';
+      isSaving = false;
+      return;
+    }
+    
+    if (!currentSettings.apiKey.trim()) {
+      saveError = 'API key is required';
+      isSaving = false;
+      return;
     }
 
-    // Stop saving state
-    isSaving = false;
+    // Test API connectivity first
+    testApiConnectivity()
+      .then(() => {
+        if (apiTestResult?.success) {
+          // API test passed, save settings
+          persistSettings(currentSettings);
+          applyTheme(currentSettings.theme as 'auto' | 'light' | 'dark');
 
-    // Visual feedback like other pages
-    saveSuccess = true;
-    setTimeout(() => {
-      saveSuccess = false;
-    }, 3000);
+          // Update hotkeys in the backend
+          if (currentSettings.hotkeys) {
+            const { pushToTalk, handsFree } = currentSettings.hotkeys;
+            settings.updateHotkeys({ pushToTalk, handsFree });
+          }
+
+          // Visual feedback
+          saveSuccess = true;
+          setTimeout(() => {
+            saveSuccess = false;
+          }, 3000);
+        } else {
+          // API test failed
+          saveError = 'Cannot save preferences: API connectivity test failed. Please check your API endpoint and key.';
+        }
+        isSaving = false;
+      })
+      .catch((error) => {
+        console.error('Error during save:', error);
+        saveError = 'Failed to save preferences. Please try again.';
+        isSaving = false;
+      });
   }
 
   function resetToDefaults() {
@@ -154,8 +184,39 @@ function savePreferences() {
   settings.updateHotkeys({ pushToTalk: currentSettings.hotkeys.pushToTalk, handsFree: currentSettings.hotkeys.handsFree });
   // brief success feedback on reset
   saveSuccess = true;
-  setTimeout(() => (saveSuccess = false), 2000);
-  }
+    setTimeout(() => (saveSuccess = false), 2000);
+    }
+    
+    async function testApiConnectivity() {
+      isTestingApi = true;
+      apiTestResult = null;
+      saveError = null; // Clear save errors when testing
+      
+      try {
+        // Validate required fields before testing
+        if (!currentSettings.apiEndpoint.trim()) {
+          apiTestResult = { success: false, message: 'API endpoint is required' };
+          return;
+        }
+        
+        if (!currentSettings.apiKey.trim()) {
+          apiTestResult = { success: false, message: 'API key is required' };
+          return;
+        }
+        
+        // Test with current form values, not saved settings
+        const result = await settings.testApiConnectivity(
+          currentSettings.apiEndpoint.trim(),
+          currentSettings.apiKey.trim()
+        );
+        apiTestResult = result;
+      } catch (error) {
+        console.error('API connectivity test failed:', error);
+        apiTestResult = { success: false, message: 'API connectivity test failed. Please try again.' };
+      } finally {
+        isTestingApi = false;
+      }
+    }
 </script>
 
 <div class="space-y-6">
@@ -180,9 +241,7 @@ function savePreferences() {
         </div>
       </div>
     </div>
-  </section>
-
-  <!-- API Settings -->
+  </section>  <!-- API Settings -->
   <section>
     <h3 class="text-lg font-medium text-gray-900 dark:text-white mb-4">API Configuration</h3>
     <div class="bg-white dark:bg-gray-800 rounded-lg border border-gray-200 dark:border-gray-700 p-6">
@@ -214,6 +273,64 @@ function savePreferences() {
           <p class="text-xs text-gray-500 dark:text-gray-400 mt-1">
             Your API key is stored locally and never sent to external servers except for API calls
           </p>
+        </div>
+
+        <!-- API Testing -->
+        <div class="mt-6 space-y-4">
+          <button
+            on:click={testApiConnectivity}
+            class="px-4 py-2 text-white rounded-lg transition-colors flex items-center justify-center"
+            class:bg-blue-600={!isTestingApi}
+            class:hover:bg-blue-700={!isTestingApi}
+            class:bg-gray-400={isTestingApi}
+            disabled={isTestingApi}
+          >
+            {#if isTestingApi}
+              <svg
+                class="w-4 h-4 mr-1 animate-spin"
+                fill="none"
+                stroke="currentColor"
+                viewBox="0 0 24 24"
+              >
+                <path
+                  stroke-linecap="round"
+                  stroke-linejoin="round"
+                  stroke-width="2"
+                  d="M12 6v6m0 0v6m0-6h6m-6 0H6"
+                ></path>
+              </svg>
+              Testing...
+            {:else}
+              Test API Connectivity
+            {/if}
+          </button>
+          
+          <!-- API Test Result -->
+          {#if apiTestResult !== null}
+            <div class="p-4 rounded-lg" class:bg-green-100={apiTestResult.success} class:bg-red-100={!apiTestResult.success} class:text-green-800={apiTestResult.success} class:text-red-800={!apiTestResult.success}>
+              {#if apiTestResult.success}
+                <div class="flex items-center">
+                  <svg class="w-5 h-5 mr-2" fill="currentColor" viewBox="0 0 20 20">
+                    <path fill-rule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zm3.707-9.293a1 1 0 00-1.414-1.414L9 10.586 7.707 9.293a1 1 0 00-1.414 1.414l2 2a1 1 0 001.414 0l4-4z" clip-rule="evenodd" />
+                  </svg>
+                  API connectivity test passed!
+                </div>
+              {:else}
+                <div>
+                  <div class="flex items-center mb-2">
+                    <svg class="w-5 h-5 mr-2" fill="currentColor" viewBox="0 0 20 20">
+                      <path fill-rule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zM8.707 7.293a1 1 0 00-1.414 1.414L8.586 10l-1.293 1.293a1 1 0 101.414 1.414L10 11.414l1.293 1.293a1 1 0 001.414-1.414L11.414 10l1.293-1.293a1 1 0 00-1.414-1.414L10 8.586 8.707 7.293z" clip-rule="evenodd" />
+                    </svg>
+                    API connectivity test failed
+                  </div>
+                  <div class="text-sm font-medium">{apiTestResult.message}</div>
+                  {#if apiTestResult.details}
+                    <div class="text-xs mt-1 opacity-80">{apiTestResult.details}</div>
+                  {/if}
+                </div>
+              {/if}
+            </div>
+          {/if}
         </div>
 
       </div>
@@ -334,5 +451,17 @@ function savePreferences() {
         Save Preferences
       {/if}
     </button>
+    
+    <!-- Save Error Display -->
+    {#if saveError}
+      <div class="mt-4 p-4 bg-red-100 text-red-800 rounded-lg">
+        <div class="flex items-center">
+          <svg class="w-5 h-5 mr-2" fill="currentColor" viewBox="0 0 20 20">
+            <path fill-rule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zM8.707 7.293a1 1 0 00-1.414 1.414L8.586 10l-1.293 1.293a1 1 0 101.414 1.414L10 11.414l1.293 1.293a1 1 0 001.414-1.414L11.414 10l1.293-1.293a1 1 0 00-1.414-1.414L10 8.586 8.707 7.293z" clip-rule="evenodd" />
+          </svg>
+          {saveError}
+        </div>
+      </div>
+    {/if}
   </div>
 </div>
