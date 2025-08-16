@@ -25,8 +25,7 @@ use debug_logger::DebugLogger;
 // Global state to track registered hotkeys and active recording
 type HotkeyRegistry = Mutex<HashMap<String, String>>;
 type RecordingState = Arc<Mutex<bool>>;
-// Store only a stop-signal sender to avoid keeping non-Send types in state
-// no audio handle stored in state (AudioCapture is not Send)
+type AudioStopSender = Arc<Mutex<Option<std::sync::mpsc::Sender<()>>>>;
 
 // Learn more about Tauri commands at https://tauri.app/develop/calling-rust/
 #[tauri::command]
@@ -202,6 +201,7 @@ async fn register_hotkeys(
 async fn start_recording(
     app: AppHandle, 
     recording_state: State<'_, RecordingState>,
+    audio_stop_sender: State<'_, AudioStopSender>,
     
     spoken_language: String,
     translation_language: String,
@@ -271,6 +271,16 @@ async fn start_recording(
         DebugLogger::log_info("Recording state set to true");
     }
 
+    // Create stop channel for proper audio cleanup
+    let (stop_tx, stop_rx) = std::sync::mpsc::channel();
+    
+    // Store the stop sender in global state so stop_recording can use it
+    {
+        let mut audio_stop = audio_stop_sender.inner().lock().map_err(|e| e.to_string())?;
+        *audio_stop = Some(stop_tx);
+        DebugLogger::log_info("Audio stop sender stored in global state");
+    }
+
     // Keep the audio_capture alive (non-Send) until pipeline stops
     
     // Create services with API key
@@ -302,7 +312,7 @@ async fn start_recording(
     let recording_state_clone = recording_state.inner().clone();
     let auto_mute = settings.auto_mute;
     
-    // Spawn task to process audio chunks  
+    // Spawn task to process audio chunks and monitor stop signal
     tokio::spawn(async move {
         // Create system audio control inside the task for auto-mute if enabled
         DebugLogger::log_info(&format!("Auto-mute setting: {}", auto_mute));
@@ -367,6 +377,22 @@ async fn start_recording(
         // Process audio chunks with timeout to detect stop/idle
         loop {
             use std::sync::mpsc::RecvTimeoutError;
+            
+            // Check stop signal first
+            match stop_rx.try_recv() {
+                Ok(_) => {
+                    DebugLogger::log_info("Stop signal received, breaking processing loop");
+                    break;
+                }
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                    DebugLogger::log_info("Stop signal channel disconnected, breaking processing loop");
+                    break;
+                }
+                Err(std::sync::mpsc::TryRecvError::Empty) => {
+                    // No stop signal, continue processing
+                }
+            }
+            
             let audio_chunk = match audio_rx.recv_timeout(Duration::from_millis(200)) {
                 Ok(chunk) => chunk,
                 Err(RecvTimeoutError::Timeout) => {
@@ -555,21 +581,44 @@ async fn start_recording(
         DebugLogger::log_info("=== PIPELINE CLEANUP COMPLETE ===");
     });
     
-    // IMPORTANT: Keep audio_capture alive by preventing it from being dropped
-    // This is a temporary solution - we'll need a proper cleanup mechanism
-    std::mem::forget(audio_capture);
+    // Store the audio_capture in a way that allows proper cleanup
+    // We need to modify the audio capture to use the recording_state for stopping
+    // For now, we'll implement the stop mechanism in the stop_recording command
     
     Ok(())
 }
 
 // Command to stop recording
 #[tauri::command]
-fn stop_recording(app: AppHandle, recording_state: State<'_, RecordingState>) -> Result<(), String> {
+fn stop_recording(
+    app: AppHandle, 
+    recording_state: State<'_, RecordingState>,
+    audio_stop_sender: State<'_, AudioStopSender>
+) -> Result<(), String> {
+    DebugLogger::log_info("stop_recording command called");
+    
+    // Set recording state to false
     {
         let mut state = recording_state.inner().lock().map_err(|e| e.to_string())?;
         *state = false;
+        DebugLogger::log_info("Recording state set to false in stop_recording");
     }
+    
+    // Send stop signal to audio processing task
+    {
+        let mut audio_stop = audio_stop_sender.inner().lock().map_err(|e| e.to_string())?;
+        if let Some(sender) = audio_stop.take() {
+            match sender.send(()) {
+                Ok(_) => DebugLogger::log_info("Stop signal sent to audio processing task"),
+                Err(_) => DebugLogger::log_info("Failed to send stop signal (channel may be closed)"),
+            }
+        } else {
+            DebugLogger::log_info("No audio stop sender available (recording may not be active)");
+        }
+    }
+    
     let _ = app.emit("recording-stopped", ());
+    DebugLogger::log_info("Recording stopped successfully");
     Ok(())
 }
 
@@ -908,7 +957,8 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_global_shortcut::Builder::new().build())
         .manage(Mutex::<HashMap<String, String>>::new(HashMap::new()))
-    .manage(Arc::new(Mutex::new(false)) as RecordingState)
+        .manage(Arc::new(Mutex::new(false)) as RecordingState)
+        .manage(Arc::new(Mutex::new(None)) as AudioStopSender)
         .invoke_handler(tauri::generate_handler![
             greet, 
             start_recording, 
