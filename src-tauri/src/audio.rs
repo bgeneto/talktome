@@ -16,7 +16,7 @@ pub struct VoiceActivityDetector {
     pub speech_threshold: f32,     // Energy threshold for speech detection
     pub silence_threshold: f32,    // Energy threshold for silence
     pub min_speech_duration_ms: u64,  // Minimum duration for speech chunk
-    pub max_speech_duration_ms: u64,  // Maximum duration for speech chunk (0.5-1s for real-time)
+    pub max_speech_duration_ms: u64,  // Maximum duration for speech chunk
     pub silence_timeout_ms: u64,   // Time to wait in silence before ending chunk
     pub overlap_ms: u64,           // Overlap to prevent word cutting
     
@@ -26,6 +26,18 @@ pub struct VoiceActivityDetector {
     current_chunk: Vec<f32>,
     overlap_buffer: Vec<f32>,      // Buffer for overlap handling
     sample_rate: u32,
+
+    // Signal conditioning
+    hp_alpha: f32,
+    hp_prev_x: f32,
+    hp_prev_y: f32,
+    agc_gain: f32,
+    target_rms: f32,
+    gain_smooth: f32,
+    max_gain: f32,
+    noise_gate: f32,
+    ema_energy: f32,
+    ema_alpha: f32,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -38,43 +50,82 @@ enum VadState {
 impl Default for VoiceActivityDetector {
     fn default() -> Self {
         Self {
-            speech_threshold: 0.001,        // Lower threshold for more sensitivity
-            silence_threshold: 0.0005,      // Lower silence threshold
-            min_speech_duration_ms: 100,    // Shorter minimum for testing
-            max_speech_duration_ms: 1000,   // 1 second maximum for real-time (was 30s)
-            silence_timeout_ms: 300,        // 300ms timeout for responsiveness (was 1s)
-            overlap_ms: 150,                // 150ms overlap to prevent word cutting
+            // With AGC target RMS ~0.1, keep thresholds with hysteresis
+            speech_threshold: 0.02,
+            silence_threshold: 0.01,
+            min_speech_duration_ms: 350,
+            max_speech_duration_ms: 2500,   // up to 2.5s chunks for better utterance grouping
+            silence_timeout_ms: 500,
+            overlap_ms: 220,                // larger overlap to avoid mid-word cuts
             
             current_state: VadState::Silence,
             state_start_time: std::time::Instant::now(),
             current_chunk: Vec::new(),
             overlap_buffer: Vec::new(),
-            sample_rate: 16000,             // 16kHz instead of 48kHz (better for speech)
+            sample_rate: 16000,
+
+            // Signal conditioning defaults (will be computed in new(sample_rate))
+            hp_alpha: 0.0,
+            hp_prev_x: 0.0,
+            hp_prev_y: 0.0,
+            agc_gain: 1.0,
+            target_rms: 0.1,
+            gain_smooth: 0.1,
+            max_gain: 8.0,
+            noise_gate: 0.003,
+            ema_energy: 0.0,
+            ema_alpha: 0.2,
         }
     }
 }
 
 impl VoiceActivityDetector {
     pub fn new(sample_rate: u32) -> Self {
-        Self {
-            sample_rate,
-            ..Default::default()
-        }
+        let mut vad = Self { sample_rate, ..Default::default() };
+        // Compute one-pole high-pass filter coefficient for ~100 Hz cutoff
+        let fc = 100.0_f32;
+        let dt = 1.0_f32 / sample_rate as f32;
+        let rc = 1.0_f32 / (2.0_f32 * std::f32::consts::PI * fc);
+        vad.hp_alpha = rc / (rc + dt);
+        vad
     }
     
     /// Process audio samples and return completed chunks
     pub fn process_audio(&mut self, samples: &[f32]) -> Vec<AudioChunk> {
         let mut completed_chunks = Vec::new();
-        
-        // Add samples to current chunk
-        self.current_chunk.extend_from_slice(samples);
-        
-        // Calculate energy for current samples
-        let energy = self.calculate_energy(samples);
+        // Copy and apply simple conditioning: high-pass, noise gate, AGC
+        let mut proc: Vec<f32> = Vec::with_capacity(samples.len());
+        for &x in samples {
+            // One-pole HPF
+            let y = self.hp_alpha * (self.hp_prev_y + x - self.hp_prev_x);
+            self.hp_prev_x = x;
+            self.hp_prev_y = y;
+            let mut s = y;
+            // Noise gate (pre-AGC)
+            if s.abs() < self.noise_gate {
+                s = 0.0;
+            }
+            proc.push(s);
+        }
+
+        // AGC: compute RMS and smooth gain
+        let rms = self.calculate_energy(&proc).max(1e-6);
+        let desired = (self.target_rms / rms).clamp(0.5, self.max_gain);
+        self.agc_gain = self.agc_gain * (1.0 - self.gain_smooth) + desired * self.gain_smooth;
+        for s in proc.iter_mut() {
+            *s = (*s * self.agc_gain).clamp(-1.0, 1.0);
+        }
+
+        // Add processed samples to current chunk
+        self.current_chunk.extend_from_slice(&proc);
+
+        // Calculate smoothed energy
+        let energy = self.calculate_energy(&proc);
+        self.ema_energy = self.ema_alpha * energy + (1.0 - self.ema_alpha) * self.ema_energy;
         
         // Determine if current samples contain speech
-        let has_speech = energy > self.speech_threshold;
-        let is_silence = energy < self.silence_threshold;
+        let has_speech = self.ema_energy > self.speech_threshold;
+        let is_silence = self.ema_energy < self.silence_threshold;
         
         let now = std::time::Instant::now();
         let state_duration = now.duration_since(self.state_start_time);
@@ -92,9 +143,9 @@ impl VoiceActivityDetector {
                     self.current_state = VadState::Speech;
                     self.state_start_time = now;
                 }
-                // In silence, keep accumulating but create chunks less frequently
-                if state_duration.as_millis() > 3000 && !self.current_chunk.is_empty() {
-                    // Send silence chunk if we've been silent for 3 seconds
+                // In silence, emit an explicit silence chunk after a short idle to mark end-of-utterance
+                if state_duration.as_millis() > 800 && !self.current_chunk.is_empty() {
+                    // Send silence chunk after short idle to signal utterance boundary
                     let chunk = AudioChunk::new(
                         self.current_chunk.clone(),
                         self.sample_rate,
@@ -111,7 +162,7 @@ impl VoiceActivityDetector {
                     self.current_state = VadState::SilenceAfterSpeech;
                     self.state_start_time = now;
                 } else if state_duration.as_millis() > self.max_speech_duration_ms as u128 {
-                    // Force chunk completion if speech is too long (0.5-1s for real-time)
+                    // Force chunk completion if speech is too long
                     self.complete_speech_chunk(&mut completed_chunks);
                     self.current_state = VadState::Silence;
                     self.state_start_time = now;

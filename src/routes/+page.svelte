@@ -22,6 +22,17 @@
 
   let recognition: any = null;
 
+  // Global unlisten handlers (set on mount)
+  let unlistenSpokenLanguage: () => void = () => {};
+  let unlistenTranslationLanguage: () => void = () => {};
+  let unlistenAudioDevice: () => void = () => {};
+  let unlistenTranscriptionUpdate: () => void = () => {};
+  let unlistenTrayStartRecording: () => void = () => {};
+  let unlistenTrayStopRecording: () => void = () => {};
+  let unlistenStartHK: () => void = () => {};
+  let unlistenStopHK: () => void = () => {};
+  let unlistenToggleHK: () => void = () => {};
+
   function showTrayNotification(message: string) {
     notificationMessage = message;
     showNotification = true;
@@ -85,85 +96,99 @@
     { code: "zh", name: "Chinese" },
   ];
 
-  onMount(async () => {
+  onMount(() => {
     // Listen for tray menu events
-    const unlistenSpokenLanguage = await listen(
-      "tray-spoken-language-change",
-      (event) => {
+    (async () => {
+      unlistenSpokenLanguage = await listen(
+        "tray-spoken-language-change",
+        (event) => {
         const language = event.payload as string;
         settings.setSpokenLanguage(language);
         selectedSourceLang = language;
-      }
-    );
+        }
+      );
 
-    const unlistenTranslationLanguage = await listen(
-      "tray-translation-language-change",
-      (event) => {
+      unlistenTranslationLanguage = await listen(
+        "tray-translation-language-change",
+        (event) => {
         const language = event.payload as string;
         settings.setTranslationLanguage(language);
         selectedTargetLang = language;
-      }
-    );
+        }
+      );
 
-    const unlistenAudioDevice = await listen(
-      "tray-audio-input-change",
-      (event) => {
+      unlistenAudioDevice = await listen(
+        "tray-audio-input-change",
+        (event) => {
         const device = event.payload as string;
         settings.setAudioDevice(device);
-      }
-    );
+        }
+      );
 
-    // Register initial hotkeys (only pushToTalk and handsFree)
-    const currentSettings = get(settings);
-    try {
-      await invoke("register_hotkeys", {
-        hotkeys: {
-          pushToTalk: currentSettings.hotkeys.pushToTalk,
-          handsFree: currentSettings.hotkeys.handsFree,
-        },
-      });
-      console.log("Hotkeys registered successfully:", {
-        pushToTalk: currentSettings.hotkeys.pushToTalk,
-        handsFree: currentSettings.hotkeys.handsFree,
-      });
-    } catch (error) {
-      console.error("Failed to register hotkeys:", error);
+  // Register initial hotkeys and listeners asynchronously
+  const currentSettings = get(settings);
+    
+
+  // Debounce guard to prevent rapid toggles from key repeat or programmatic loops
+    let lastToggle = 0;
+    function guard(ms = 400) {
+      const now = Date.now();
+      if (now - lastToggle < ms) return false;
+      lastToggle = now;
+      return true;
     }
 
-    // Listen for hotkey events
-    const unlistenHotkeyTriggered = await listen(
-      "hotkey-triggered",
-      (event) => {
-        const payload = event.payload as { action?: string; state?: string };
-        const action = payload?.action;
-        const state = payload?.state;
-        console.log("Hotkey triggered action:", action);
+  // Declare unlisten placeholders for hotkeys
+  let unlistenStartHK = () => {};
+  let unlistenStopHK = () => {};
+  let unlistenToggleHK = () => {};
 
-        if (
-          (action === "pushToTalk" || action === "handsFree") &&
-          (state === undefined || state === "pressed")
-        ) {
-          if (!isRecording) {
-            startRecording();
-          } else {
-            stopRecording();
-          }
+    // Explicit hotkey events from backend
+      try {
+        await invoke("register_hotkeys", {
+          hotkeys: {
+            pushToTalk: currentSettings.hotkeys.pushToTalk,
+            handsFree: currentSettings.hotkeys.handsFree,
+          },
+        });
+        console.log("Hotkeys registered successfully:", {
+          pushToTalk: currentSettings.hotkeys.pushToTalk,
+          handsFree: currentSettings.hotkeys.handsFree,
+        });
+      } catch (error) {
+        console.error("Failed to register hotkeys:", error);
+      }
+
+      unlistenStartHK = await listen("start-recording-from-hotkey", () => {
+        if (!isRecording && guard()) startRecording();
+      });
+      unlistenStopHK = await listen("stop-recording-from-hotkey", () => {
+        if (isRecording && guard()) stopRecording();
+      });
+      unlistenToggleHK = await listen("toggle-recording-from-hotkey", () => {
+        if (!guard()) return;
+        if (isRecording) stopRecording(); else startRecording();
+      });
+
+    // Listen for finalized utterances from Rust backend
+    unlistenTranscriptionUpdate = await listen(
+      "transcribed-text",
+      (event) => {
+        const payload: any = event.payload;
+        if (typeof payload === "string") {
+          // Backward compatibility
+          transcribedText = payload;
+          // Don't trigger client translation; backend has already handled correction/translation
+          translatedText = payload;
+        } else if (payload) {
+          transcribedText = payload.raw ?? payload.final ?? "";
+          translatedText = payload.final ?? payload.raw ?? "";
         }
       }
     );
 
-    // Listen for real-time transcription updates from Rust backend
-    const unlistenTranscriptionUpdate = await listen(
-      "transcription-update",
-      (event) => {
-        const text = event.payload as string;
-        transcribedText = text;
-        translateText(text);
-      }
-    );
-
     // Listen for recording started event from tray
-    const unlistenTrayStartRecording = await listen(
+    unlistenTrayStartRecording = await listen(
       "tray-start-recording",
       () => {
         startRecording();
@@ -171,19 +196,22 @@
     );
 
     // Listen for recording stopped event from tray
-    const unlistenTrayStopRecording = await listen(
+    unlistenTrayStopRecording = await listen(
       "tray-stop-recording",
       () => {
         stopRecording();
       }
     );
+    })();
 
     return () => {
       // Clean up event listeners
       unlistenSpokenLanguage();
       unlistenTranslationLanguage();
       unlistenAudioDevice();
-      unlistenHotkeyTriggered();
+      unlistenStartHK();
+      unlistenStopHK();
+      unlistenToggleHK();
       unlistenTranscriptionUpdate();
       unlistenTrayStartRecording();
       unlistenTrayStopRecording();
@@ -363,8 +391,13 @@
     translatedText = "";
   }
 
-  function copyToClipboard(text: string) {
-    navigator.clipboard.writeText(text);
+  async function copyToClipboard(text: string) {
+    try {
+      await navigator.clipboard.writeText(text);
+      showTrayNotification("Copied to clipboard");
+    } catch (e) {
+      console.error("Clipboard copy failed", e);
+    }
   }
 
   function exportText() {

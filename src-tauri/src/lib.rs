@@ -6,6 +6,7 @@ use tauri::{
 use tauri_plugin_global_shortcut::{Code, Modifiers, Shortcut, ShortcutState, GlobalShortcutExt};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
+// no additional thread/state for AudioCapture; it's not Send
 mod settings;
 use settings::AppSettings;
 mod audio;
@@ -24,6 +25,8 @@ use debug_logger::DebugLogger;
 // Global state to track registered hotkeys and active recording
 type HotkeyRegistry = Mutex<HashMap<String, String>>;
 type RecordingState = Arc<Mutex<bool>>;
+// Store only a stop-signal sender to avoid keeping non-Send types in state
+// no audio handle stored in state (AudioCapture is not Send)
 
 // Learn more about Tauri commands at https://tauri.app/develop/calling-rust/
 #[tauri::command]
@@ -150,27 +153,32 @@ async fn register_hotkeys(
         let app_for_emit = app.clone();
         global_shortcut
             .on_shortcut(shortcut, move |_app, _sc, ev| {
-                let state = match ev.state {
-                    ShortcutState::Pressed => "pressed",
-                    ShortcutState::Released => "released",
+                // Normalize action names to support both camelCase and snake_case
+                let normalized = match action_clone.as_str() {
+                    "pushToTalk" | "push_to_talk" => "push_to_talk",
+                    "handsFree" | "hands_free" => "hands_free",
+                    other => other,
                 };
-                if action_clone == "push_to_talk" || action_clone == "hands_free" {
-                    if state == "pressed" {
-                        // Start recording - need to get recording_state somehow
+                match (normalized, ev.state) {
+                    // Push-to-talk: Pressed = start, Released = stop
+                    ("push_to_talk", ShortcutState::Pressed) => {
                         let _ = app_for_emit.emit("start-recording-from-hotkey", ());
-                    } else {
-                        // Stop recording
+                    }
+                    ("push_to_talk", ShortcutState::Released) => {
                         let _ = app_for_emit.emit("stop-recording-from-hotkey", ());
                     }
-                } else {
-                                    let _ = app_for_emit.emit(
-                                        "hotkey-triggered",
-                                        serde_json::json!({
-                                            "action": action_clone,
-                                            "state": state,
-                                        }),
-                                    );
-                                }
+                    // Hands-free: Pressed = toggle (ignore release)
+                    ("hands_free", ShortcutState::Pressed) => {
+                        let _ = app_for_emit.emit("toggle-recording-from-hotkey", ());
+                    }
+                    _ => {
+                        let state = match ev.state { ShortcutState::Pressed => "pressed", ShortcutState::Released => "released" };
+                        let _ = app_for_emit.emit(
+                            "hotkey-triggered",
+                            serde_json::json!({ "action": action_clone, "state": state }),
+                        );
+                    }
+                }
             })
             .map_err(|e| {
                 format!(
@@ -194,6 +202,7 @@ async fn register_hotkeys(
 async fn start_recording(
     app: AppHandle, 
     recording_state: State<'_, RecordingState>,
+    
     spoken_language: String,
     translation_language: String,
     api_endpoint: String,
@@ -261,10 +270,17 @@ async fn start_recording(
         *state = true;
         DebugLogger::log_info("Recording state set to true");
     }
+
+    // Keep the audio_capture alive (non-Send) until pipeline stops
     
     // Create services with API key
     DebugLogger::log_info("Creating STT service");
-    let stt_service = STTService::new(settings.api_endpoint.clone(), api_key.clone(), settings.stt_model.clone());
+    let stt_service = STTService::new(
+        settings.api_endpoint.clone(),
+        api_key.clone(),
+        settings.stt_model.clone(),
+        settings.spoken_language.clone(),
+    );
     DebugLogger::log_info(&format!("STT service created with endpoint: {} and model: {}", settings.api_endpoint, settings.stt_model));
     
     let translation_service = if settings.translation_enabled && settings.translation_language != "none" {
@@ -330,8 +346,64 @@ async fn start_recording(
         DebugLogger::log_info("About to enter audio chunk processing loop");
         DebugLogger::log_info("Waiting for first audio chunk...");
         
-        // Process audio chunks
-        while let Ok(audio_chunk) = audio_rx.recv() {
+        // Aggregation state: accumulate text and flush on utterance boundary
+        use std::time::{Duration, Instant};
+        let mut agg_text = String::new();
+        let mut last_speech = Instant::now();
+        let idle_threshold = Duration::from_millis(700);
+
+        fn append_dedup(agg: &mut String, next: &str) {
+            // Token-aware suffix/prefix dedup: use last up to 12 chars as heuristic
+            let take = agg.chars().rev().take(12).collect::<String>();
+            let tail: String = take.chars().rev().collect();
+            if !tail.is_empty() && next.starts_with(&tail) {
+                agg.push_str(&next[tail.len()..]);
+            } else {
+                if !agg.is_empty() { agg.push(' '); }
+                agg.push_str(next);
+            }
+        }
+
+        // Process audio chunks with timeout to detect stop/idle
+        loop {
+            use std::sync::mpsc::RecvTimeoutError;
+            let audio_chunk = match audio_rx.recv_timeout(Duration::from_millis(200)) {
+                Ok(chunk) => chunk,
+                Err(RecvTimeoutError::Timeout) => {
+                    // Periodically check for stop and idle flush
+                    let stop = {
+                        let state = recording_state_clone.lock().unwrap();
+                        !*state
+                    };
+                    if stop {
+                        DebugLogger::log_info("Recording stopped (timeout check), breaking processing loop");
+                        break;
+                    }
+                    if !agg_text.trim().is_empty() && last_speech.elapsed() >= idle_threshold {
+                        DebugLogger::log_info("Idle timeout reached, flushing aggregated text (no explicit silence chunk)");
+                        let final_text = if let Some(ref translation_service) = translation_service {
+                            match translation_service.process_text(
+                                &agg_text,
+                                &settings.spoken_language,
+                                &settings.translation_language,
+                                settings.translation_enabled
+                            ).await {
+                                Ok(processed_text) => processed_text,
+                                Err(e) => { DebugLogger::log_pipeline_error("translation", &e); agg_text.clone() }
+                            }
+                        } else { agg_text.clone() };
+                        let _ = text_insertion_service.insert_text(&final_text);
+                        let _ = app.emit("transcribed-text", &final_text);
+                        let _ = app.emit("processing-audio", false);
+                        agg_text.clear();
+                    }
+                    continue;
+                }
+                Err(RecvTimeoutError::Disconnected) => {
+                    DebugLogger::log_info("Audio channel disconnected, breaking processing loop");
+                    break;
+                }
+            };
             DebugLogger::log_info("=== NEW AUDIO CHUNK RECEIVED ===");
             
             // Check if recording has been stopped
@@ -343,92 +415,86 @@ async fn start_recording(
                 }
             }
             
+            // Handle silence marker to flush utterance if idle long enough
+            if matches!(audio_chunk.chunk_type, crate::audio::ChunkType::SilenceChunk) {
+                if !agg_text.trim().is_empty() && last_speech.elapsed() >= idle_threshold {
+                    DebugLogger::log_info(&format!("Idle >= {}ms, flushing utterance", idle_threshold.as_millis()));
+                    let raw_text = agg_text.clone();
+                    let final_text = if let Some(ref translation_service) = translation_service {
+                        match translation_service.process_text(
+                            &agg_text,
+                            &settings.spoken_language,
+                            &settings.translation_language,
+                            settings.translation_enabled
+                        ).await {
+                            Ok(processed_text) => {
+                                DebugLogger::log_translation_response(true, Some(&processed_text), None, None);
+                                processed_text
+                            },
+                            Err(e) => {
+                                DebugLogger::log_translation_response(false, None, Some(&e), None);
+                                DebugLogger::log_pipeline_error("translation", &e);
+                                let _ = app.emit("processing-error", format!("Translation Error - Using fallback: {}", e));
+                                agg_text.clone()
+                            }
+                        }
+                    } else {
+                        agg_text.clone()
+                    };
+
+                    // Insert text into focused application once per utterance
+                    match text_insertion_service.insert_text(&final_text) {
+                        Ok(_) => DebugLogger::log_text_insertion(&final_text, true, None),
+                        Err(e) => {
+                            DebugLogger::log_text_insertion(&final_text, false, Some(&e));
+                            DebugLogger::log_pipeline_error("text_insertion", &e);
+                            let _ = app.emit("processing-error", format!("Text insertion error: {}", e));
+                        }
+                    }
+                    let _ = app.emit("transcribed-text", serde_json::json!({
+                        "raw": raw_text,
+                        "final": final_text
+                    }));
+                    let _ = app.emit("processing-audio", false);
+                    agg_text.clear();
+                }
+                continue;
+            }
+
             // Log audio chunk details
             let max_amplitude = audio_chunk.data.iter().map(|&x| x.abs()).fold(0.0, f32::max);
             let has_activity = audio_chunk.has_audio_activity();
             DebugLogger::log_audio_chunk(audio_chunk.data.len(), audio_chunk.sample_rate, has_activity, max_amplitude);
-            
+
             // Skip empty or silent chunks
             if audio_chunk.is_empty() || !has_activity {
                 DebugLogger::log_info("Skipping empty or silent audio chunk");
                 continue;
             }
-            
+
             // Emit status to frontend
-            DebugLogger::log_info("Emitting processing-audio event to frontend");
             let _ = app.emit("processing-audio", true);
-            
+
             // Transcribe audio chunk
             DebugLogger::log_info("=== STARTING STT TRANSCRIPTION ===");
             match stt_service.transcribe_chunk(audio_chunk.data, audio_chunk.sample_rate).await {
                 Ok(transcribed_text) => {
                     DebugLogger::log_transcription_response(true, Some(&transcribed_text), None);
-                    DebugLogger::log_info(&format!("=== STT SUCCESS: '{}' ===", transcribed_text));
-                    
                     if !transcribed_text.trim().is_empty() {
-                        DebugLogger::log_info("=== STARTING TRANSLATION/CORRECTION ===");
-                        // Always process text through translation service for correction/translation
-                        let final_text = if let Some(ref translation_service) = translation_service {
-                            DebugLogger::log_info("Translation service available, processing text");
-                            match translation_service.process_text(
-                                &transcribed_text,
-                                &settings.spoken_language,
-                                &settings.translation_language,
-                                settings.translation_enabled
-                            ).await {
-                                Ok(processed_text) => {
-                                    DebugLogger::log_translation_response(true, Some(&processed_text), None, None);
-                                    DebugLogger::log_info(&format!("=== TRANSLATION SUCCESS: '{}' ===", processed_text));
-                                    processed_text
-                                },
-                                Err(e) => {
-                                    DebugLogger::log_translation_response(false, None, Some(&e), None);
-                                    DebugLogger::log_pipeline_error("translation", &e);
-                                    DebugLogger::log_info(&format!("=== TRANSLATION FAILED, USING FALLBACK: '{}' ===", transcribed_text));
-                                    // Emit error to frontend
-                                    let _ = app.emit("processing-error", format!("Translation Error - Using fallback: {}", e));
-                                    transcribed_text.clone() // Fallback to original text
-                                }
-                            }
-                        } else {
-                            DebugLogger::log_info("No translation service available, using original transcribed text");
-                            transcribed_text.clone()
-                        };
-                        
-                        // Insert text into focused application
-                        DebugLogger::log_info("=== STARTING TEXT INSERTION ===");
-                        match text_insertion_service.insert_text(&final_text) {
-                            Ok(_) => {
-                                DebugLogger::log_text_insertion(&final_text, true, None);
-                                DebugLogger::log_info("=== TEXT INSERTION SUCCESS ===");
-                            },
-                            Err(e) => {
-                                DebugLogger::log_text_insertion(&final_text, false, Some(&e));
-                                DebugLogger::log_pipeline_error("text_insertion", &e);
-                                DebugLogger::log_info(&format!("=== TEXT INSERTION FAILED: {} ===", e));
-                                let _ = app.emit("processing-error", format!("Text insertion error: {}", e));
-                            }
-                        }
-                        
-                        // Emit success event to frontend with transcribed text
-                        DebugLogger::log_info("Emitting transcribed-text event to frontend");
-                        let _ = app.emit("transcribed-text", &final_text);
-                        DebugLogger::log_info("Emitting processing-audio false event to frontend");
-                        let _ = app.emit("processing-audio", false);
-                        DebugLogger::log_info("=== PIPELINE CHUNK COMPLETE ===");
-                    } else {
-                        DebugLogger::log_info("Transcribed text is empty, skipping processing");
+                        append_dedup(&mut agg_text, &transcribed_text);
+                        last_speech = Instant::now();
+                        DebugLogger::log_info(&format!("Aggregated text length now: {}", agg_text.len()));
                     }
+                    let _ = app.emit("processing-audio", false);
                 }
                 Err(e) => {
                     DebugLogger::log_transcription_response(false, None, Some(&e));
                     DebugLogger::log_pipeline_error("transcription", &e);
-                    DebugLogger::log_info(&format!("=== STT FAILED: {} ===", e));
                     let _ = app.emit("processing-error", format!("Transcription error: {}", e));
                     let _ = app.emit("processing-audio", false);
                 }
             }
-        }
+    }
         
         DebugLogger::log_info("Audio receiver channel closed - no more audio chunks");
         DebugLogger::log_info("This could indicate:");
@@ -454,6 +520,29 @@ async fn start_recording(
             DebugLogger::log_info("No system audio control to clean up");
         }
         
+        // Final flush if any text remains
+        if !agg_text.trim().is_empty() {
+            let raw_text = agg_text.clone();
+            let final_text = if let Some(ref translation_service) = translation_service {
+                match translation_service.process_text(
+                    &agg_text,
+                    &settings.spoken_language,
+                    &settings.translation_language,
+                    settings.translation_enabled
+                ).await {
+                    Ok(processed_text) => processed_text,
+                    Err(_) => agg_text.clone(),
+                }
+            } else {
+                agg_text.clone()
+            };
+            let _ = text_insertion_service.insert_text(&final_text);
+            let _ = app.emit("transcribed-text", serde_json::json!({
+                "raw": raw_text,
+                "final": final_text
+            }));
+        }
+
         // Clean up recording state
         {
             let mut state = recording_state_clone.lock().unwrap();
@@ -475,9 +564,12 @@ async fn start_recording(
 
 // Command to stop recording
 #[tauri::command]
-fn stop_recording(recording_state: State<'_, RecordingState>) -> Result<(), String> {
-    let mut state = recording_state.inner().lock().map_err(|e| e.to_string())?;
-    *state = false;
+fn stop_recording(app: AppHandle, recording_state: State<'_, RecordingState>) -> Result<(), String> {
+    {
+        let mut state = recording_state.inner().lock().map_err(|e| e.to_string())?;
+        *state = false;
+    }
+    let _ = app.emit("recording-stopped", ());
     Ok(())
 }
 
@@ -816,7 +908,7 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_global_shortcut::Builder::new().build())
         .manage(Mutex::<HashMap<String, String>>::new(HashMap::new()))
-        .manage(Arc::new(Mutex::new(false)) as RecordingState)
+    .manage(Arc::new(Mutex::new(false)) as RecordingState)
         .invoke_handler(tauri::generate_handler![
             greet, 
             start_recording, 

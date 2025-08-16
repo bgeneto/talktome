@@ -73,6 +73,47 @@ impl DebugLogger {
         Ok(())
     }
     
+    /// Save a WAV (or any binary) dump alongside the log file for debugging and return the path
+    pub fn save_wav_dump(label: &str, bytes: &[u8]) -> Option<std::path::PathBuf> {
+        // Determine base logs directory from current log path
+        let log_path = if let Ok(path) = LOG_PATH.lock() {
+            if let Some(ref path) = *path {
+                path.clone()
+            } else {
+                return None;
+            }
+        } else {
+            return None;
+        };
+
+        let logs_dir = match log_path.parent() {
+            Some(dir) => dir.to_path_buf(),
+            None => return None,
+        };
+
+        // Build filename with timestamp
+        let ts = chrono::Utc::now().format("%Y%m%d_%H%M%S%.3f");
+        let filename = format!("{}_{}.wav", label, ts);
+        let out_path = logs_dir.join(filename);
+
+        // Best-effort create dir and write
+        if let Err(e) = std::fs::create_dir_all(&logs_dir) {
+            Self::write_log(&format!("SAVE_WAV_DUMP: Failed to ensure logs dir: {}", e));
+            return None;
+        }
+
+        match std::fs::write(&out_path, bytes) {
+            Ok(_) => {
+                Self::write_log(&format!("SAVE_WAV_DUMP: Wrote {} bytes to {}", bytes.len(), out_path.display()));
+                Some(out_path)
+            }
+            Err(e) => {
+                Self::write_log(&format!("SAVE_WAV_DUMP: Failed to write WAV: {}", e));
+                None
+            }
+        }
+    }
+
     /// Initialize debug logging with explicit state
     pub fn init_with_state(app_handle: &AppHandle, enabled: bool) -> Result<(), String> {
         // Update global state

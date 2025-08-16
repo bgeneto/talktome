@@ -8,10 +8,11 @@ pub struct STTService {
     api_endpoint: String,
     api_key: String,
     model: String,
+    spoken_language: String,
 }
 
 impl STTService {
-    pub fn new(api_endpoint: String, api_key: String, model: String) -> Self {
+    pub fn new(api_endpoint: String, api_key: String, model: String, spoken_language: String) -> Self {
         let client = reqwest::Client::builder()
             .timeout(Duration::from_secs(30))
             .build()
@@ -22,6 +23,7 @@ impl STTService {
             api_endpoint,
             api_key,
             model,
+            spoken_language,
         }
     }
 
@@ -51,18 +53,29 @@ impl STTService {
                 DebugLogger::log_pipeline_error("stt", &error_msg);
                 error_msg
             })?;
-        DebugLogger::log_info(&format!("STT: WAV encoding complete, output size={} bytes", audio_bytes.len()));
+    DebugLogger::log_info(&format!("STT: WAV encoding complete, output size={} bytes", audio_bytes.len()));
 
-        // Skip very small audio files (less than 1 second)
-        let min_size = (sample_rate * 2) as usize; // 1 second of 16-bit audio
-        DebugLogger::log_info(&format!("STT: Size check - audio_bytes.len()={}, min_size={}", audio_bytes.len(), min_size));
-        if audio_bytes.len() < min_size {
-            DebugLogger::log_info(&format!("Audio chunk too small ({} bytes), skipping", audio_bytes.len()));
+        // Skip very short audio (use duration threshold based on original sample_rate)
+        let duration_secs = audio_data.len() as f32 / sample_rate as f32;
+        let min_duration = 0.6_f32; // seconds
+        DebugLogger::log_info(&format!(
+            "STT: Duration check - duration={:.3}s, threshold={:.3}s",
+            duration_secs, min_duration
+        ));
+        if duration_secs < min_duration {
+            DebugLogger::log_info(&format!("Audio chunk too short ({:.3}s), skipping", duration_secs));
             return Ok(String::new());
         }
 
         DebugLogger::log_transcription_request(audio_bytes.len(), &self.api_endpoint);
         
+        // Save exact WAV payload to logs for debugging (only for requests we actually send)
+        if let Some(path) = DebugLogger::save_wav_dump("stt_request", &audio_bytes) {
+            DebugLogger::log_info(&format!("STT: Saved WAV dump to {}", path.display()));
+        } else {
+            DebugLogger::log_info("STT: Could not save WAV dump (no log path yet?)");
+        }
+
         self.send_transcription_request(audio_bytes).await
     }
 
@@ -77,10 +90,20 @@ impl STTService {
             
             // Create multipart form data fresh for each attempt
             DebugLogger::log_info("STT: Creating multipart form data");
-            let form = reqwest::multipart::Form::new()
+            let mut form = reqwest::multipart::Form::new()
                 .text("model", self.model.clone())
-                .text("response_format", "json")
-                .text("language", "en") // Optional: specify language if known
+                .text("response_format", "json");
+
+            // Only include language when explicitly set (not 'auto' or empty)
+            let lang = self.spoken_language.trim();
+            if !lang.is_empty() && lang.to_lowercase() != "auto" {
+                DebugLogger::log_info(&format!("STT: Including language hint: '{}'", lang));
+                form = form.text("language", lang.to_string());
+            } else {
+                DebugLogger::log_info("STT: No language hint provided (auto-detect)");
+            }
+
+            form = form
                 .part("file", reqwest::multipart::Part::bytes(audio_bytes.clone())
                     .file_name("audio.wav")
                     .mime_str("audio/wav")
@@ -182,36 +205,56 @@ impl STTService {
     }
 
     fn encode_wav(&self, samples: &[f32], sample_rate: u32) -> Result<Vec<u8>, String> {
-        // Convert f32 samples to i16
-        let mut audio_data = Vec::with_capacity(samples.len() * 2);
-        for &sample in samples {
-            let sample_i16 = (sample * i16::MAX as f32) as i16;
+        // Downsample to 16 kHz mono PCM16 for Whisper
+        let target_rate: u32 = 16_000;
+        let (resampled, out_rate) = if sample_rate == target_rate {
+            (samples.to_vec(), sample_rate)
+        } else {
+            if samples.is_empty() { return Err("No samples to encode".into()); }
+            let ratio = target_rate as f32 / sample_rate as f32;
+            let out_len = ((samples.len() as f32) * ratio).max(1.0).round() as usize;
+            let mut out = Vec::with_capacity(out_len);
+            for i in 0..out_len {
+                let src_pos = i as f32 / ratio;
+                let idx = src_pos.floor() as usize;
+                if idx + 1 < samples.len() {
+                    let frac = src_pos - idx as f32;
+                    let s = samples[idx] * (1.0 - frac) + samples[idx + 1] * frac;
+                    out.push(s);
+                } else {
+                    out.push(samples[samples.len() - 1]);
+                }
+            }
+            (out, target_rate)
+        };
+
+        // Convert to i16 PCM
+        let mut audio_data = Vec::with_capacity(resampled.len() * 2);
+        for &sample in &resampled {
+            let clamped = sample.clamp(-1.0, 1.0);
+            let sample_i16 = (clamped * i16::MAX as f32) as i16;
             audio_data.extend_from_slice(&sample_i16.to_le_bytes());
         }
 
         // Create WAV header
         let mut wav_data = Vec::new();
-        
         // RIFF header
         wav_data.extend_from_slice(b"RIFF");
         wav_data.extend_from_slice(&(36 + audio_data.len() as u32).to_le_bytes()); // File size
         wav_data.extend_from_slice(b"WAVE");
-        
         // Format chunk
         wav_data.extend_from_slice(b"fmt ");
         wav_data.extend_from_slice(&16u32.to_le_bytes()); // Chunk size
         wav_data.extend_from_slice(&1u16.to_le_bytes()); // Audio format (PCM)
         wav_data.extend_from_slice(&1u16.to_le_bytes()); // Number of channels
-        wav_data.extend_from_slice(&sample_rate.to_le_bytes()); // Sample rate
-        wav_data.extend_from_slice(&(sample_rate * 2).to_le_bytes()); // Byte rate
+        wav_data.extend_from_slice(&out_rate.to_le_bytes()); // Sample rate
+        wav_data.extend_from_slice(&(out_rate * 2).to_le_bytes()); // Byte rate
         wav_data.extend_from_slice(&2u16.to_le_bytes()); // Block align
         wav_data.extend_from_slice(&16u16.to_le_bytes()); // Bits per sample
-        
         // Data chunk
         wav_data.extend_from_slice(b"data");
         wav_data.extend_from_slice(&(audio_data.len() as u32).to_le_bytes()); // Data size
         wav_data.extend_from_slice(&audio_data);
-        
         Ok(wav_data)
     }
 }
