@@ -54,7 +54,7 @@ impl Default for VoiceActivityDetector {
             speech_threshold: 0.02,
             silence_threshold: 0.01,
             min_speech_duration_ms: 350,
-            max_speech_duration_ms: 2500,   // up to 2.5s chunks for better utterance grouping
+            max_speech_duration_ms: 5000,   // up to 2.5s chunks for better utterance grouping
             silence_timeout_ms: 500,
             overlap_ms: 220,                // larger overlap to avoid mid-word cuts
             
