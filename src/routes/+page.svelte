@@ -8,6 +8,9 @@
   let isRecording = false;
   let transcribedText = "";
   let translatedText = "";
+  // Store chunks separately to avoid mixing translated and original text
+  let originalChunks: string[] = [];
+  let translatedChunks: string[] = [];
   let selectedSourceLang = "auto";
   let selectedTargetLang = "en";
   let isTranslating = false;
@@ -22,6 +25,30 @@
 
   let recognition: any = null;
 
+  // Append text helper with simple deduplication to avoid repeated appends
+  function appendDedup(existing: string, next: string) {
+    const a = (existing || "").trim();
+    const b = (next || "").trim();
+    if (!b) return a;
+    if (!a) return b;
+    if (a.endsWith(b)) return a;
+    if (b.startsWith(a)) return b;
+    return a + " " + b;
+  }
+
+  function pushChunkDedup(bucket: string[], chunk: string) {
+    const c = (chunk || "").trim();
+    if (!c) return;
+    const last = bucket.length ? bucket[bucket.length - 1] : null;
+    if (last && last.trim() === c) return;
+    bucket.push(c);
+  }
+
+  function syncDisplays() {
+    transcribedText = originalChunks.join(" ");
+    translatedText = translatedChunks.join(" ");
+  }
+
   // Global unlisten handlers (set on mount)
   let unlistenSpokenLanguage: () => void = () => {};
   let unlistenTranslationLanguage: () => void = () => {};
@@ -32,6 +59,12 @@
   let unlistenStartHK: () => void = () => {};
   let unlistenStopHK: () => void = () => {};
   let unlistenToggleHK: () => void = () => {};
+  let unlistenRecordingStopped: () => void = () => {};
+
+  // Flag to indicate the previous transcription session ended. We only
+  // clear accumulated UI text when starting a new session after the prior
+  // one has been stopped (authorized by backend 'recording-stopped').
+  let sessionEnded = true;
 
   function showTrayNotification(message: string) {
     notificationMessage = message;
@@ -60,8 +93,11 @@
           }
         }
         if (finalTranscript) {
-          transcribedText = finalTranscript;
-          translateText(finalTranscript);
+          // Push raw transcript chunk into originalChunks and sync UI
+          pushChunkDedup(originalChunks, finalTranscript);
+          syncDisplays();
+          // Translate and append the translation chunk into translatedChunks
+          translateText(finalTranscript, { append: true });
         }
       };
 
@@ -175,14 +211,34 @@
       "transcribed-text",
       (event) => {
         const payload: any = event.payload;
+        // Payload can be either a plain string (legacy / simple final text)
+        // or an object { raw, final } where raw is original aggregated utterance
+        // and final is processed/translated text when translation is enabled.
         if (typeof payload === "string") {
-          // Backward compatibility
-          transcribedText = payload;
-          // Don't trigger client translation; backend has already handled correction/translation
-          translatedText = payload;
+          const finalText: string = payload;
+          // Heuristic: if payload contains non-ASCII characters (accents, ç, ã, etc.)
+          // it's likely the original language (e.g., Portuguese) and should go into
+          // the Original area; request client-side translation for it.
+          const hasNonAscii = /[^\x00-\x7F]/.test(finalText);
+          const translationEnabledUI = selectedTargetLang && selectedTargetLang !== "none" && selectedTargetLang !== selectedSourceLang;
+          if (hasNonAscii) {
+            pushChunkDedup(originalChunks, finalText);
+            if (translationEnabledUI) translateText(finalText, { append: true });
+          } else {
+            // ASCII-only: probably already translated (English) -> translated area
+            pushChunkDedup(translatedChunks, finalText);
+          }
+          syncDisplays();
         } else if (payload) {
-          transcribedText = payload.raw ?? payload.final ?? "";
-          translatedText = payload.final ?? payload.raw ?? "";
+          const raw: string = payload.raw ?? payload.final ?? "";
+          const finalT: string = payload.final ?? payload.raw ?? "";
+          if (raw) pushChunkDedup(originalChunks, raw);
+          if (finalT && selectedTargetLang && selectedTargetLang !== "none" && selectedTargetLang !== selectedSourceLang) {
+            pushChunkDedup(translatedChunks, finalT);
+          } else if (!finalT && raw && selectedTargetLang && selectedTargetLang !== "none" && selectedTargetLang !== selectedSourceLang) {
+            translateText(raw, { append: true });
+          }
+          syncDisplays();
         }
       }
     );
@@ -196,12 +252,18 @@
     );
 
     // Listen for recording stopped event from tray
-    unlistenTrayStopRecording = await listen(
+      unlistenTrayStopRecording = await listen(
       "tray-stop-recording",
       () => {
         stopRecording();
       }
     );
+
+      // Listen to backend recording-stopped to mark session ended
+      unlistenRecordingStopped = await listen("recording-stopped", () => {
+        sessionEnded = true;
+        showTrayNotification("Recording stopped");
+      });
     })();
 
     return () => {
@@ -215,6 +277,7 @@
       unlistenTranscriptionUpdate();
       unlistenTrayStartRecording();
       unlistenTrayStopRecording();
+  unlistenRecordingStopped();
     };
   });
 
@@ -240,8 +303,13 @@
       });
       isRecording = true;
       isListening = true;
-      transcribedText = "";
-      translatedText = "";
+      // Only clear previous session text if the previous session ended
+      if (sessionEnded) {
+  originalChunks = [];
+  translatedChunks = [];
+  syncDisplays();
+        sessionEnded = false;
+      }
       useWebSpeechAPI = false;
     } catch (error) {
       console.error("Failed to start recording with Rust backend:", error);
@@ -272,8 +340,13 @@
 
         isRecording = true;
         isListening = true;
-        transcribedText = "";
-        translatedText = "";
+        // Only clear previous session text if the previous session ended
+        if (sessionEnded) {
+          originalChunks = [];
+          translatedChunks = [];
+          syncDisplays();
+          sessionEnded = false;
+        }
         useWebSpeechAPI = true;
         recognition.start();
       } catch (error) {
@@ -358,7 +431,7 @@
     }
   }
 
-  async function translateText(text: string) {
+  async function translateText(text: string, opts: { append?: boolean } = {}) {
     if (
       !text.trim() ||
       selectedTargetLang === selectedSourceLang ||
@@ -374,7 +447,14 @@
         sourceLang: selectedSourceLang,
         targetLang: selectedTargetLang,
       });
-      translatedText = result as string;
+      const translatedChunk = (result as string) || "";
+      if (opts.append) {
+        pushChunkDedup(translatedChunks, translatedChunk);
+        syncDisplays();
+      } else {
+        translatedChunks = [translatedChunk];
+        syncDisplays();
+      }
     } catch (error) {
       console.error("Translation error with Rust backend:", error);
       // Fallback to free translation API (MyMemory API)
@@ -390,7 +470,14 @@
         if (response.ok) {
           const data = await response.json();
           if (data.responseStatus === 200) {
-            translatedText = data.responseData.translatedText;
+            const translatedChunk = data.responseData.translatedText;
+            if (opts.append) {
+              pushChunkDedup(translatedChunks, translatedChunk);
+              syncDisplays();
+            } else {
+              translatedChunks = [translatedChunk];
+              syncDisplays();
+            }
           } else {
             throw new Error("Translation failed");
           }
@@ -408,8 +495,9 @@
   }
 
   function clearText() {
-    transcribedText = "";
-    translatedText = "";
+  originalChunks = [];
+  translatedChunks = [];
+  syncDisplays();
   }
 
   async function copyToClipboard(text: string) {
