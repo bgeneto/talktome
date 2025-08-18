@@ -224,6 +224,11 @@
       // Get current settings from localStorage
       const currentSettings = get(settings);
 
+      try {
+        await invoke("frontend_log", { tag: "start_recording_attempt", payload: { ts: Date.now() } });
+      } catch (e) {
+        console.warn("frontend_log failed:", e);
+      }
       await invoke("start_recording", {
         spokenLanguage: currentSettings.spokenLanguage,
         translationLanguage: currentSettings.translationLanguage,
@@ -327,10 +332,26 @@
     } else {
       // Stop recording with Rust backend services
       try {
+        try {
+          await invoke("frontend_log", { tag: "stop_recording_attempt", payload: { ts: Date.now() } });
+        } catch (e) {
+          console.warn("frontend_log failed:", e);
+        }
         await invoke("stop_recording");
-        isRecording = false;
-        isListening = false;
-        audioLevel = 0;
+        // Query backend authoritative state — stop_recording may be ignored during text insertion
+        try {
+          const status = await invoke("get_recording_status") as boolean;
+          // Update UI based on actual backend state
+          isRecording = status;
+          isListening = status;
+          if (!status) audioLevel = 0;
+        } catch (e) {
+          // If we can't query status, conservatively stop UI state to avoid stuck UI
+          console.warn("get_recording_status failed:", e);
+          isRecording = false;
+          isListening = false;
+          audioLevel = 0;
+        }
       } catch (error) {
         console.error("Failed to stop recording with Rust backend:", error);
       }

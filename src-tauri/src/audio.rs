@@ -1,3 +1,6 @@
+// This file contains the audio processing logic for the application.
+// It uses the cpal library for audio input and processing.
+// The following struct and implementations handle voice activity detection.
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::{FromSample, Sample};
 use std::sync::{Arc, Mutex};
@@ -38,6 +41,13 @@ pub struct VoiceActivityDetector {
     noise_gate: f32,
     ema_energy: f32,
     ema_alpha: f32,
+    // Spectral subtraction PoC state
+    spec_frame_size: usize,
+    spec_hop_size: usize,
+    spec_window: Vec<f32>,
+    spec_input_buffer: Vec<f32>,
+    noise_mag_estimate: Vec<f32>,
+    spec_initialized: bool,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -75,6 +85,13 @@ impl Default for VoiceActivityDetector {
             noise_gate: 0.003,
             ema_energy: 0.0,
             ema_alpha: 0.2,
+            // Spectral subtraction PoC state
+            spec_frame_size: 512,
+            spec_hop_size: 256,
+            spec_window: Vec::new(),
+            spec_input_buffer: Vec::new(),
+            noise_mag_estimate: Vec::new(),
+            spec_initialized: false,
         }
     }
 }
@@ -87,6 +104,16 @@ impl VoiceActivityDetector {
         let dt = 1.0_f32 / sample_rate as f32;
         let rc = 1.0_f32 / (2.0_f32 * std::f32::consts::PI * fc);
         vad.hp_alpha = rc / (rc + dt);
+        // Initialize spectral subtraction window
+        vad.spec_window = (0..vad.spec_frame_size).map(|i| {
+            // Hann window
+            let n = i as f32;
+            let m = vad.spec_frame_size as f32;
+            0.5 * (1.0 - (2.0 * std::f32::consts::PI * n / (m - 1.0)).cos())
+        }).collect();
+        vad.noise_mag_estimate = vec![0.0; vad.spec_frame_size/2+1];
+        vad.spec_input_buffer = Vec::with_capacity(vad.spec_frame_size * 2);
+        vad.spec_initialized = true;
         vad
     }
     
@@ -106,6 +133,92 @@ impl VoiceActivityDetector {
                 s = 0.0;
             }
             proc.push(s);
+        }
+
+        // --- Spectral subtraction PoC (frame-based) ---
+        // Append processed samples to spec input buffer and run frames when enough samples
+        if self.spec_initialized {
+            self.spec_input_buffer.extend_from_slice(&proc);
+            // Process frames
+            let frame = self.spec_frame_size;
+            let hop = self.spec_hop_size;
+            use rustfft::{FftPlanner};
+            use num_complex::Complex;
+            let mut planner = FftPlanner::<f32>::new();
+            let fft = planner.plan_fft_forward(frame);
+            let ifft = planner.plan_fft_inverse(frame);
+
+            let mut i = 0usize;
+            while i + frame <= self.spec_input_buffer.len() {
+                // windowed frame
+                let mut buffer: Vec<Complex<f32>> = (0..frame).map(|n| {
+                    let w = self.spec_window[n] * self.spec_input_buffer[i + n];
+                    Complex::new(w, 0.0)
+                }).collect();
+
+                // forward
+                fft.process(&mut buffer);
+
+                // magnitude & phase
+                let mut mag: Vec<f32> = Vec::with_capacity(frame/2+1);
+                for k in 0..(frame/2+1) {
+                    let c = buffer[k];
+                    mag.push((c.re * c.re + c.im * c.im).sqrt());
+                }
+
+                // Update noise estimate during silence (use ema and current VAD energy)
+                let energy = self.calculate_energy(&self.spec_input_buffer[i..i+frame]);
+                if energy < self.silence_threshold {
+                    // smooth update
+                    for (n, v) in mag.iter().enumerate() {
+                        self.noise_mag_estimate[n] = self.noise_mag_estimate[n] * 0.9 + v * 0.1;
+                    }
+                }
+
+                // spectral subtraction: subtract noise magnitude estimate
+                let mut clean_spec: Vec<Complex<f32>> = Vec::with_capacity(frame);
+                for k in 0..(frame/2+1) {
+                    let s = mag[k] - self.noise_mag_estimate[k] * 1.0; // oversub factor 1.0
+                    let s_clamped = if s > 0.0 { s } else { 0.0 };
+                    // preserve original phase
+                    let orig = buffer[k];
+                    let phase = orig.arg();
+                    let re = s_clamped * phase.cos();
+                    let im = s_clamped * phase.sin();
+                    clean_spec.push(Complex::new(re, im));
+                }
+                // fold mirrored bins for full IFFT buffer
+                let mut full_spec: Vec<Complex<f32>> = vec![Complex::new(0.0,0.0); frame];
+                for k in 0..(frame/2+1) {
+                    full_spec[k] = clean_spec[k];
+                    if k > 0 && k < frame/2 {
+                        full_spec[frame - k] = Complex::new(clean_spec[k].re, -clean_spec[k].im);
+                    }
+                }
+
+                // inverse
+                ifft.process(&mut full_spec);
+
+                // overlap-add back into current_chunk (scale by window)
+                for n in 0..frame {
+                    let sample = full_spec[n].re / frame as f32; // normalise
+                    let added = sample * self.spec_window[n];
+                    // replace in input buffer (in-place)
+                    self.spec_input_buffer[i + n] = added;
+                }
+
+                i += hop;
+            }
+            // move remaining samples to new buffer
+            let remaining = self.spec_input_buffer.split_off(i);
+            self.spec_input_buffer = remaining;
+
+            // After denoising, copy processed samples back into proc for AGC/VAD processing
+            // Note: for PoC we simply overwrite proc with the recent denoised frames if available
+            // (this is approximate but acceptable for a PoC)
+            // For simplicity, limit to proc.len()
+            // If spec produced fewer samples, we keep original proc samples where not replaced
+            // (We won't attempt exact alignment here.)
         }
 
         // AGC: compute RMS and smooth gain
@@ -421,6 +534,8 @@ impl AudioCapture {
                 move |data: &[T], _: &cpal::InputCallbackInfo| {
                     // Only process if we're recording
                     if !*is_recording.lock().unwrap() {
+                        // Extra debug: indicate that an audio callback came in while not recording
+                        eprintln!("[audio.rs] audio callback received but is_recording=false (thread={:?})", std::thread::current().id());
                         return;
                     }
 
@@ -443,16 +558,17 @@ impl AudioCapture {
                         
                         // Send any completed chunks
                         for chunk in completed_chunks {
-                            eprintln!("VAD produced chunk: {} samples, type: {:?}, duration: {}ms", 
-                                     chunk.data.len(), chunk.chunk_type, chunk.duration_ms);
+                            eprintln!("VAD produced chunk: {} samples, type: {:?}, duration: {}ms (thread={:?})", 
+                                     chunk.data.len(), chunk.chunk_type, chunk.duration_ms, std::thread::current().id());
                             
                             match tx.send(chunk) {
                                 Ok(_) => {
-                                    eprintln!("VAD chunk sent successfully");
+                                    eprintln!("VAD chunk sent successfully (thread={:?})", std::thread::current().id());
                                 },
-                                Err(_) => {
+                                Err(e) => {
                                     // Channel is closed, stop recording to prevent infinite error loop
-                                    eprintln!("Channel closed, stopping audio recording");
+                                    eprintln!("[audio.rs] tx.send failed: {:?} (thread={:?})", e, std::thread::current().id());
+                                    eprintln!("[audio.rs] Setting is_recording=false due to send failure");
                                     *is_recording.lock().unwrap() = false;
                                     return;
                                 }

@@ -7,7 +7,6 @@ use tauri_plugin_global_shortcut::{Code, Modifiers, Shortcut, ShortcutState, Glo
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::sync::mpsc as std_mpsc;
-use whoami;
 // no additional thread/state for AudioCapture; it's not Send
 mod settings;
 use settings::AppSettings;
@@ -28,6 +27,12 @@ use debug_logger::DebugLogger;
 type HotkeyRegistry = Mutex<HashMap<String, String>>;
 type RecordingState = Arc<Mutex<bool>>;
 type AudioStopSender = Arc<Mutex<Option<std::sync::mpsc::Sender<()>>>>;
+// Flag used to temporarily suppress stop events while we perform text insertion
+type InsertionSuppression = Arc<Mutex<bool>>;
+// Track last stop timestamp to avoid rapid duplicate stops (cooldown)
+type LastStopTime = Arc<Mutex<Option<std::time::Instant>>>;
+// Track the last hotkey action and when it happened to help debug stop origins
+type LastHotkey = Arc<Mutex<Option<(String, std::time::Instant)>>>;
 
 // Commands sent to the single-threaded audio manager which owns the non-Send AudioCapture
 enum AudioManagerCommand {
@@ -143,6 +148,7 @@ async fn register_hotkeys(
     registry: State<'_, HotkeyRegistry>,
 ) -> Result<(), String> {
     let global_shortcut = app.global_shortcut();
+    DebugLogger::log_info(&format!("register_hotkeys called, hotkeys_count={}", hotkeys.len()));
     
     // Unregister existing hotkeys
     {
@@ -168,34 +174,67 @@ async fn register_hotkeys(
         let action_clone = action.clone();
         let app_for_emit = app.clone();
         global_shortcut
-            .on_shortcut(shortcut, move |_app, _sc, ev| {
-                // Normalize action names to support both camelCase and snake_case
-                let normalized = match action_clone.as_str() {
-                    "pushToTalk" | "push_to_talk" => "push_to_talk",
-                    "handsFree" | "hands_free" => "hands_free",
-                    other => other,
-                };
-                match (normalized, ev.state) {
-                    // Push-to-talk: Pressed = start, Released = stop
-                    ("push_to_talk", ShortcutState::Pressed) => {
-                        let _ = app_for_emit.emit("start-recording-from-hotkey", ());
+            .on_shortcut(shortcut, move |app_handle, _sc, ev| {
+                    // Read insertion suppression early
+                    let suppress = *app_handle.state::<InsertionSuppression>().inner().lock().unwrap();
+
+                    // Debounce repeated hotkey firings from programmatic input (ms)
+                    let debounce_ms = 150u128;
+                    if let Ok(mut last_hotkey) = app_handle.state::<LastHotkey>().inner().lock() {
+                        if let Some((ref last_action, ref when)) = *last_hotkey {
+                            if last_action == &action_clone && when.elapsed().as_millis() < debounce_ms {
+                                let ts_ms = std::time::SystemTime::now()
+                                    .duration_since(std::time::UNIX_EPOCH)
+                                    .map(|d| d.as_millis())
+                                    .unwrap_or(0);
+                                DebugLogger::log_info(&format!("HOTKEY_DEBOUNCE: action={}, state={:?}, suppress={}, ts_ms={}, last_elapsed={}ms", action_clone, ev.state, suppress, ts_ms, when.elapsed().as_millis()));
+                                return;
+                            }
+                        }
+                        // update last hotkey timestamp for correlation
+                        *last_hotkey = Some((action_clone.clone(), std::time::Instant::now()));
                     }
-                    ("push_to_talk", ShortcutState::Released) => {
-                        let _ = app_for_emit.emit("stop-recording-from-hotkey", ());
+
+                    let ts_ms = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map(|d| d.as_millis())
+                        .unwrap_or(0);
+                    DebugLogger::log_info(&format!("HOTKEY_TRIGGER: action={}, state={:?}, suppress={}, ts_ms={}", action_clone, ev.state, suppress, ts_ms));
+
+                    // Normalize action names to support both camelCase and snake_case
+                    let normalized = match action_clone.as_str() {
+                        "pushToTalk" | "push_to_talk" => "push_to_talk",
+                        "handsFree" | "hands_free" => "hands_free",
+                        other => other,
+                    };
+
+                    // If an insertion is in progress, ignore start/toggle events entirely
+                    if suppress {
+                        DebugLogger::log_info("Hotkey event suppressed due to text insertion in progress");
+                        return;
                     }
-                    // Hands-free: Pressed = toggle (ignore release)
-                    ("hands_free", ShortcutState::Pressed) => {
-                        let _ = app_for_emit.emit("toggle-recording-from-hotkey", ());
+
+                    match (normalized, ev.state) {
+                        // Push-to-talk: Pressed = start, Released = stop
+                        ("push_to_talk", ShortcutState::Pressed) => {
+                            let _ = app_for_emit.emit("start-recording-from-hotkey", ());
+                        }
+                        ("push_to_talk", ShortcutState::Released) => {
+                            let _ = app_for_emit.emit("stop-recording-from-hotkey", ());
+                        }
+                        // Hands-free: Pressed = toggle (ignore release)
+                        ("hands_free", ShortcutState::Pressed) => {
+                            let _ = app_for_emit.emit("toggle-recording-from-hotkey", ());
+                        }
+                        _ => {
+                            let state = match ev.state { ShortcutState::Pressed => "pressed", ShortcutState::Released => "released" };
+                            let _ = app_for_emit.emit(
+                                "hotkey-triggered",
+                                serde_json::json!({ "action": action_clone, "state": state }),
+                            );
+                        }
                     }
-                    _ => {
-                        let state = match ev.state { ShortcutState::Pressed => "pressed", ShortcutState::Released => "released" };
-                        let _ = app_for_emit.emit(
-                            "hotkey-triggered",
-                            serde_json::json!({ "action": action_clone, "state": state }),
-                        );
-                    }
-                }
-            })
+                })
             .map_err(|e| {
                 format!(
                     "Failed to attach handler for hotkey '{}' (action '{}'): {}",
@@ -335,8 +374,50 @@ async fn start_recording(
     DebugLogger::log_info("Translation service created");
     
     DebugLogger::log_info("Creating text insertion service");
-    let text_insertion_service = TextInsertionService::new();
+    let text_insertion_service = std::sync::Arc::new(TextInsertionService::new());
     DebugLogger::log_info("Text insertion service created");
+    // Create a non-blocking background worker for text insertion so the audio
+    // pipeline never blocks on platform typing utilities (PowerShell/xdotool/etc.).
+    let (text_insertion_tx, mut text_insertion_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+    // Control channel for the worker to notify when insertion starts/ends
+    let (insertion_ctrl_tx, mut _insertion_ctrl_rx) = tokio::sync::mpsc::unbounded_channel::<bool>();
+    // Use the managed insertion suppression so register_hotkeys can observe it
+    let insertion_suppression = app.state::<InsertionSuppression>().inner().clone();
+
+    // Spawn a dedicated background task that performs the blocking insertions
+    // using spawn_blocking so it doesn't block the Tokio runtime.
+    let text_insertion_service_for_worker = text_insertion_service.clone();
+    let insertion_ctrl_tx_for_worker = insertion_ctrl_tx.clone();
+    let insertion_suppression_for_worker = insertion_suppression.clone();
+    tokio::spawn(async move {
+        DebugLogger::log_info("TEXT_INSERTION_WORKER: started");
+        while let Some(text) = text_insertion_rx.recv().await {
+            DebugLogger::log_info(&format!("TEXT_INSERTION_WORKER: received text (len={}) to insert", text.len()));
+            // Signal insertion start
+            let _ = insertion_ctrl_tx_for_worker.send(true);
+            // Also set the suppression flag for consumers that check it directly
+            {
+                let mut s = insertion_suppression_for_worker.lock().unwrap();
+                *s = true;
+            }
+            let svc = text_insertion_service_for_worker.clone();
+            let t = text.clone();
+            // Run the platform Command in a blocking thread pool
+            let res = tokio::task::spawn_blocking(move || svc.insert_text(&t)).await;
+            match res {
+                Ok(Ok(())) => DebugLogger::log_info("TEXT_INSERTION_WORKER: insertion succeeded"),
+                Ok(Err(e)) => DebugLogger::log_pipeline_error("text_insertion_worker", &format!("insertion error: {}", e)),
+                Err(e) => DebugLogger::log_pipeline_error("text_insertion_worker", &format!("spawn_blocking failed: {}", e)),
+            }
+            // Signal insertion complete
+            let _ = insertion_ctrl_tx_for_worker.send(false);
+            {
+                let mut s = insertion_suppression_for_worker.lock().unwrap();
+                *s = false;
+            }
+        }
+        DebugLogger::log_info("TEXT_INSERTION_WORKER: exiting (sender closed)");
+    });
     
     // Clone values for the async task
     let app_clone = app.clone();
@@ -374,11 +455,10 @@ async fn start_recording(
             None
         };
         
-        let stt_service = stt_service;
-        let translation_service = translation_service;
-        let text_insertion_service = text_insertion_service;
-        let app = app_clone;
-        let settings = settings;
+    let stt_service = stt_service;
+    let translation_service = translation_service;
+    let app = app_clone;
+    let settings = settings;
         
         DebugLogger::log_info("Starting audio processing pipeline");
         DebugLogger::log_info(&format!("Pipeline settings: translation_enabled={}, spoken_lang={}, target_lang={}", 
@@ -449,7 +529,12 @@ async fn start_recording(
                                 Err(e) => { DebugLogger::log_pipeline_error("translation", &e); agg_text.clone() }
                             }
                         } else { agg_text.clone() };
-                        let _ = text_insertion_service.insert_text(&final_text);
+                        DebugLogger::log_info("TEXT_INSERTION: queueing text for insertion (idle flush)");
+                        if let Err(e) = text_insertion_tx.send(final_text.clone()) {
+                            DebugLogger::log_pipeline_error("text_insertion", &format!("failed to queue text (idle flush): {}", e));
+                        } else {
+                            DebugLogger::log_info("TEXT_INSERTION: queued (idle flush)");
+                        }
                         let _ = app.emit("transcribed-text", &final_text);
                         let _ = app.emit("processing-audio", false);
                         agg_text.clear();
@@ -500,13 +585,13 @@ async fn start_recording(
                     };
 
                     // Insert text into focused application once per utterance
-                    match text_insertion_service.insert_text(&final_text) {
-                        Ok(_) => DebugLogger::log_text_insertion(&final_text, true, None),
-                        Err(e) => {
-                            DebugLogger::log_text_insertion(&final_text, false, Some(&e));
-                            DebugLogger::log_pipeline_error("text_insertion", &e);
-                            let _ = app.emit("processing-error", format!("Text insertion error: {}", e));
-                        }
+                    DebugLogger::log_info("TEXT_INSERTION: queueing text for insertion (silence flush)");
+                    if let Err(e) = text_insertion_tx.send(final_text.clone()) {
+                        DebugLogger::log_pipeline_error("text_insertion", &format!("failed to queue text (silence flush): {}", e));
+                        let _ = app.emit("processing-error", format!("Text insertion queue error: {}", e));
+                    } else {
+                        DebugLogger::log_text_insertion(&final_text, true, None);
+                        DebugLogger::log_info("TEXT_INSERTION: queued (silence flush)");
                     }
                     let _ = app.emit("transcribed-text", serde_json::json!({
                         "raw": raw_text,
@@ -593,7 +678,12 @@ async fn start_recording(
             } else {
                 agg_text.clone()
             };
-            let _ = text_insertion_service.insert_text(&final_text);
+            DebugLogger::log_info("TEXT_INSERTION: queueing text for insertion (final flush)");
+            if let Err(e) = text_insertion_tx.send(final_text.clone()) {
+                DebugLogger::log_pipeline_error("text_insertion", &format!("failed to queue text (final flush): {}", e));
+            } else {
+                DebugLogger::log_info("TEXT_INSERTION: queued (final flush)");
+            }
             let _ = app.emit("transcribed-text", serde_json::json!({
                 "raw": raw_text,
                 "final": final_text
@@ -627,6 +717,43 @@ fn stop_recording(
     audio_stop_sender: State<'_, AudioStopSender>,
     audio_manager: State<'_, AudioManagerHandle>
 ) -> Result<(), String> {
+    // Dump last hotkey info for correlation
+    if let Ok(last) = app.state::<LastHotkey>().inner().lock() {
+        if let Some((action, when)) = &*last {
+            let since = when.elapsed().as_millis();
+            DebugLogger::log_info(&format!("stop_recording invoked - last_hotkey: action={}, {}ms ago", action, since));
+        } else {
+            DebugLogger::log_info("stop_recording invoked - last_hotkey: none");
+        }
+    }
+    // If a text insertion is in progress, ignore stop requests to avoid
+    // aborting the recording mid-insert (text insertion runs in background).
+    if let Ok(suppress) = app.state::<InsertionSuppression>().inner().lock() {
+        if *suppress {
+            DebugLogger::log_info("stop_recording ignored because text insertion is in progress (InsertionSuppression=true)");
+            return Ok(());
+        }
+    }
+    // If we're not currently recording, ignore duplicate stop requests.
+    // Also implement a short cooldown so rapid repeated Stop commands are dropped.
+    let cooldown_ms = 300u128;
+    if let Ok(lst) = app.state::<LastStopTime>().inner().lock() {
+        if let Some(prev) = *lst {
+            let elapsed = prev.elapsed().as_millis();
+            if elapsed < cooldown_ms {
+                DebugLogger::log_info(&format!("stop_recording ignored due to cooldown ({}ms since last stop)", elapsed));
+                return Ok(());
+            }
+        }
+    }
+    {
+        let state = recording_state.inner().lock().map_err(|e| e.to_string())?;
+        if !*state {
+            DebugLogger::log_info("stop_recording called but recording_state already false - ignoring duplicate stop");
+            return Ok(());
+        }
+    }
+
     // Send Stop command to audio manager-owned capture if available
     if let Ok(sender) = audio_manager.lock() {
         let (ack_tx, ack_rx) = std_mpsc::channel();
@@ -657,6 +784,10 @@ fn stop_recording(
         } else {
             DebugLogger::log_info("No audio stop sender available (recording may not be active)");
         }
+    }
+    // Update last stop time
+    if let Ok(mut lst) = app.state::<LastStopTime>().inner().lock() {
+        *lst = Some(std::time::Instant::now());
     }
     
     let _ = app.emit("recording-stopped", ());
@@ -949,6 +1080,14 @@ async fn get_data_directory_info(app: AppHandle) -> Result<serde_json::Value, St
     }))
 }
 
+// Command used by the frontend to annotate backend logs with frontend-originated events
+#[tauri::command]
+async fn frontend_log(tag: String, payload: Option<serde_json::Value>) -> Result<(), String> {
+    let payload_str = payload.map(|p| p.to_string()).unwrap_or_else(|| "null".to_string());
+    DebugLogger::log_info(&format!("FRONTEND_LOG: tag={}, payload={}", tag, payload_str));
+    Ok(())
+}
+
 // New commands for localStorage-based settings
 #[tauri::command]
 async fn load_settings_from_frontend() -> Result<String, String> {
@@ -1031,6 +1170,8 @@ pub fn run() {
         .manage(Mutex::<HashMap<String, String>>::new(HashMap::new()))
         .manage(Arc::new(Mutex::new(false)) as RecordingState)
         .manage(Arc::new(Mutex::new(None)) as AudioStopSender)
+    .manage(Arc::new(Mutex::new(None)) as LastStopTime)
+        .manage(Arc::new(Mutex::new(None)) as LastHotkey)
         // Spawn a dedicated single-thread audio manager to own non-Send AudioCapture
         .manage({
             // Create an mpsc channel for sending commands to the manager
@@ -1054,6 +1195,7 @@ pub fn run() {
                             match capture.start_capture() {
                                 Ok(rx) => {
                                     audio_capture_opt = Some(capture);
+                                    DebugLogger::log_info("Audio manager successfully started capture and returned receiver");
                                     let _ = reply.send(Ok(rx));
                                 }
                                 Err(e) => {
@@ -1066,9 +1208,14 @@ pub fn run() {
                         AudioManagerCommand::Stop { reply } => {
                             DebugLogger::log_info("Audio manager received Stop command");
                             if let Some(mut cap) = audio_capture_opt.take() {
+                                DebugLogger::log_info("Audio manager is stopping active capture (cap was Some)");
                                 if let Err(e) = cap.stop_recording() {
                                     DebugLogger::log_pipeline_error("audio_manager", &format!("Error stopping capture: {}", e));
+                                } else {
+                                    DebugLogger::log_info("Audio manager stop_recording() returned Ok");
                                 }
+                            } else {
+                                DebugLogger::log_info("Audio manager Stop called but no active capture was present (cap was None)");
                             }
                             if let Some(r) = reply {
                                 let _ = r.send(Ok(()));
@@ -1102,6 +1249,7 @@ pub fn run() {
             clear_debug_logs,
             get_log_file_path,
             get_data_directory_info,
+            frontend_log,
             load_settings_from_frontend,
             save_settings_from_frontend,
             init_debug_logging

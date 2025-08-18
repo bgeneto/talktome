@@ -89,7 +89,7 @@ impl AppSettings {
     }
 
     /// Store API key securely
-    pub fn store_api_key(&self, app_handle: &AppHandle, api_key: String) -> Result<(), String> {
+    pub fn store_api_key(&self, _app_handle: &AppHandle, api_key: String) -> Result<(), String> {
     // Store in OS keyring
     let service = "talktome_api_key";
     let username = whoami::username();
