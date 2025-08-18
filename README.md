@@ -133,7 +133,7 @@ Fine-tune voice detection in the settings store:
 vad: {
   speechThreshold: 0.02,        // Energy threshold for speech
   silenceThreshold: 0.01,       // Energy threshold for silence
-  maxChunkDurationMs: 2500,     // Maximum chunk duration
+  maxChunkDurationMs: 5000,     // Maximum chunk duration
   silenceTimeoutMs: 500,        // Silence timeout
   overlapMs: 220,               // Overlap to prevent word cutting
   sampleRate: 16000             // Audio sample rate
@@ -182,7 +182,7 @@ VoiceActivityDetector {
     speech_threshold: 0.02,
     silence_threshold: 0.01,
     min_speech_duration_ms: 350,
-    max_speech_duration_ms: 2500,
+    max_speech_duration_ms: 5000,
     silence_timeout_ms: 500,
     overlap_ms: 220,
     // Signal processing

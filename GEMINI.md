@@ -205,7 +205,7 @@ flush() -> AudioChunk[]
 
 4. Chunk Generation:
    - Minimum speech duration: 350ms
-   - Maximum chunk duration: 2500ms
+   - Maximum chunk duration: 5000ms
    - Overlap: 220ms to prevent word cutting
    - Silence timeout: 500ms
 ```
@@ -216,7 +216,7 @@ VADConfig {
     speechThreshold: 0.02,         // Energy threshold for speech
     silenceThreshold: 0.01,        // Energy threshold for silence
     minSpeechDurationMs: 350,      // Minimum speech chunk
-    maxSpeechDurationMs: 2500,     // Maximum chunk duration
+    maxSpeechDurationMs: 5000,     // Maximum chunk duration
     silenceTimeoutMs: 500,         // Silence before ending
     overlapMs: 220,                // Overlap for continuity
     sampleRate: 16000,             // Target sample rate
@@ -414,7 +414,7 @@ interface AppSettings {
     vad: {
         speechThreshold: number;      // 0.02
         silenceThreshold: number;     // 0.01
-        maxChunkDurationMs: number;   // 2500
+        maxChunkDurationMs: number;   // 5000
         silenceTimeoutMs: number;     // 500
         overlapMs: number;            // 220
         sampleRate: number;           // 16000

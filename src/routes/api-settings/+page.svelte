@@ -21,6 +21,8 @@
   let translationModelsError: string | null = null;
   let apiTestResult: { success: boolean; message: string; details?: string } | null = null;
   let saveError: string | null = null;
+  let migrationMessage: string | null = null;
+  let migrationSuccess = false;
 
   onMount(() => {
     // Subscribe to settings changes
@@ -240,6 +242,38 @@
       apiTestResult = { success: false, message: 'API connectivity test failed. Please try again.' };
     } finally {
       isTestingApi = false;
+    }
+  }
+
+  async function migrateLegacyKey() {
+    migrationMessage = null;
+    migrationSuccess = false;
+    try {
+      const legacy = await settings.exportLegacyApiKey();
+      if (!legacy) {
+        migrationMessage = 'No legacy API key found.';
+        migrationSuccess = false;
+        return;
+      }
+
+      // Save via normal API key setter which stores securely via backend
+      settings.setApiKey(legacy);
+
+      // Delete legacy file on backend
+      const deleted = await settings.deleteLegacyApiKey();
+      if (deleted) {
+        migrationMessage = 'Legacy API key migrated to secure storage and removed from disk.';
+        migrationSuccess = true;
+        // clear local field
+        currentSettings.apiKey = '';
+      } else {
+        migrationMessage = 'Key migrated to secure storage, but failed to delete legacy file. Please remove it manually.';
+        migrationSuccess = false;
+      }
+    } catch (err) {
+      console.error('Migration failed:', err);
+      migrationMessage = 'Migration failed. See logs for details.';
+      migrationSuccess = false;
     }
   }
 </script>

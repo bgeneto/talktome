@@ -6,6 +6,8 @@ use tauri::{
 use tauri_plugin_global_shortcut::{Code, Modifiers, Shortcut, ShortcutState, GlobalShortcutExt};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
+use std::sync::mpsc as std_mpsc;
+use whoami;
 // no additional thread/state for AudioCapture; it's not Send
 mod settings;
 use settings::AppSettings;
@@ -26,6 +28,21 @@ use debug_logger::DebugLogger;
 type HotkeyRegistry = Mutex<HashMap<String, String>>;
 type RecordingState = Arc<Mutex<bool>>;
 type AudioStopSender = Arc<Mutex<Option<std::sync::mpsc::Sender<()>>>>;
+
+// Commands sent to the single-threaded audio manager which owns the non-Send AudioCapture
+enum AudioManagerCommand {
+    Start {
+        // reply channel to send back the audio chunk receiver or error
+        reply: std_mpsc::Sender<Result<std_mpsc::Receiver<crate::audio::AudioChunk>, String>>,
+    },
+    Stop {
+        // optional reply to acknowledge stop
+        reply: Option<std_mpsc::Sender<Result<(), String>>>,
+    },
+}
+
+// Arc+Mutex wrapper so we can store the command sender in Tauri managed state
+type AudioManagerHandle = Arc<Mutex<std_mpsc::Sender<AudioManagerCommand>>>;
 
 // Learn more about Tauri commands at https://tauri.app/develop/calling-rust/
 #[tauri::command]
@@ -202,6 +219,7 @@ async fn start_recording(
     app: AppHandle, 
     recording_state: State<'_, RecordingState>,
     audio_stop_sender: State<'_, AudioStopSender>,
+    audio_manager: State<'_, AudioManagerHandle>,
     
     spoken_language: String,
     translation_language: String,
@@ -251,18 +269,31 @@ async fn start_recording(
         debug_logging: false, // Will be set properly by frontend debug logging state
     };
     
-    // Create audio capture instance
-    DebugLogger::log_info("Creating AudioCapture instance");
-    let mut audio_capture = AudioCapture::new();
-    
-    // Start capturing audio
-    DebugLogger::log_info("Starting audio capture");
-    let audio_rx = audio_capture.start_capture().map_err(|e| {
-        let error_msg = format!("Failed to start audio capture: {}", e);
-        DebugLogger::log_pipeline_error("audio_capture", &error_msg);
-        error_msg
-    })?;
-    DebugLogger::log_info("Audio capture started successfully");
+    // Request the audio manager (single-thread owner) to start capture and return the receiver
+    DebugLogger::log_info("Requesting audio manager to start capture");
+    let (reply_tx, reply_rx) = std_mpsc::channel();
+    {
+        let sender = audio_manager.lock().map_err(|e| e.to_string())?;
+        sender.send(AudioManagerCommand::Start { reply: reply_tx }).map_err(|e| {
+            let msg = format!("Failed to send start command to audio manager: {}", e);
+            DebugLogger::log_pipeline_error("audio_manager", &msg);
+            msg
+        })?;
+    }
+    // Wait for manager to reply with the audio receiver
+    let audio_rx = match reply_rx.recv_timeout(std::time::Duration::from_secs(5)) {
+        Ok(Ok(rx)) => rx,
+        Ok(Err(e)) => {
+            DebugLogger::log_pipeline_error("audio_manager", &e);
+            return Err(e);
+        }
+        Err(e) => {
+            let msg = format!("Timed out waiting for audio manager start reply: {}", e);
+            DebugLogger::log_pipeline_error("audio_manager", &msg);
+            return Err(msg);
+        }
+    };
+    DebugLogger::log_info("Audio capture started successfully (owned by audio manager thread)");
     
     // Set recording state to true
     {
@@ -593,8 +624,19 @@ async fn start_recording(
 fn stop_recording(
     app: AppHandle, 
     recording_state: State<'_, RecordingState>,
-    audio_stop_sender: State<'_, AudioStopSender>
+    audio_stop_sender: State<'_, AudioStopSender>,
+    audio_manager: State<'_, AudioManagerHandle>
 ) -> Result<(), String> {
+    // Send Stop command to audio manager-owned capture if available
+    if let Ok(sender) = audio_manager.lock() {
+        let (ack_tx, ack_rx) = std_mpsc::channel();
+        let _ = sender.send(AudioManagerCommand::Stop { reply: Some(ack_tx) });
+        match ack_rx.recv_timeout(std::time::Duration::from_secs(2)) {
+            Ok(Ok(_)) => DebugLogger::log_info("Audio manager acknowledged stop"),
+            Ok(Err(e)) => DebugLogger::log_pipeline_error("audio_manager", &format!("Stop error: {}", e)),
+            Err(_) => DebugLogger::log_info("No ack from audio manager on stop (continuing)")
+        }
+    }
     DebugLogger::log_info("stop_recording command called");
     
     // Set recording state to false
@@ -785,6 +827,12 @@ async fn get_api_key(app: AppHandle) -> Result<String, String> {
 }
 
 #[tauri::command]
+async fn debug_api_key_info(app: AppHandle) -> Result<serde_json::Value, String> {
+    let settings = AppSettings::default();
+    settings.debug_api_key_info(&app)
+}
+
+#[tauri::command]
 async fn has_api_key(app: AppHandle) -> Result<bool, String> {
     let settings = AppSettings::default(); // Only need the methods, not loaded settings
     Ok(settings.has_api_key(&app))
@@ -951,14 +999,87 @@ async fn init_debug_logging(app: AppHandle, enabled: bool) -> Result<(), String>
     Ok(())
 }
 
+#[tauri::command]
+fn export_legacy_api_key(app: AppHandle) -> Result<Option<String>, String> {
+    let settings = AppSettings::default();
+    settings.export_legacy_api_key(&app)
+}
+
+#[tauri::command]
+fn delete_legacy_api_key(app: AppHandle) -> Result<(), String> {
+    let settings = AppSettings::default();
+    settings.delete_legacy_api_key(&app)
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
-        .plugin(tauri_plugin_opener::init())
-        .plugin(tauri_plugin_global_shortcut::Builder::new().build())
+    .plugin(tauri_plugin_opener::init())
+    .plugin(tauri_plugin_global_shortcut::Builder::new().build())
+        // Register Stronghold plugin for encrypted at-rest storage (JS guest APIs available)
+        .setup(|app| {
+            // derive salt path for argon2 KDF used by the plugin
+            let salt_path = app
+                .path()
+                .app_local_data_dir()
+                .expect("could not resolve app local data path")
+                .join("salt.txt");
+            // register the plugin using the Builder::with_argon2 helper
+            let _ = app.handle().plugin(tauri_plugin_stronghold::Builder::with_argon2(&salt_path).build());
+            Ok(())
+        })
         .manage(Mutex::<HashMap<String, String>>::new(HashMap::new()))
         .manage(Arc::new(Mutex::new(false)) as RecordingState)
         .manage(Arc::new(Mutex::new(None)) as AudioStopSender)
+        // Spawn a dedicated single-thread audio manager to own non-Send AudioCapture
+        .manage({
+            // Create an mpsc channel for sending commands to the manager
+            let (cmd_tx, cmd_rx) = std_mpsc::channel::<AudioManagerCommand>();
+            // Spawn thread that owns AudioCapture and responds to commands
+            std::thread::spawn(move || {
+                DebugLogger::log_info("Audio manager thread starting");
+                // The audio capture instance is owned here on this single thread
+                let mut audio_capture_opt: Option<AudioCapture> = None;
+                for cmd in cmd_rx.iter() {
+                    match cmd {
+                        AudioManagerCommand::Start { reply } => {
+                            DebugLogger::log_info("Audio manager received Start command");
+                            // If already started, return error
+                            if audio_capture_opt.is_some() {
+                                let _ = reply.send(Err("Audio capture already started".to_string()));
+                                continue;
+                            }
+                            // Create and start capture (only once)
+                            let mut capture = AudioCapture::new();
+                            match capture.start_capture() {
+                                Ok(rx) => {
+                                    audio_capture_opt = Some(capture);
+                                    let _ = reply.send(Ok(rx));
+                                }
+                                Err(e) => {
+                                    let msg = format!("Failed to start capture in manager: {}", e);
+                                    DebugLogger::log_pipeline_error("audio_manager", &msg);
+                                    let _ = reply.send(Err(msg));
+                                }
+                            }
+                        }
+                        AudioManagerCommand::Stop { reply } => {
+                            DebugLogger::log_info("Audio manager received Stop command");
+                            if let Some(mut cap) = audio_capture_opt.take() {
+                                if let Err(e) = cap.stop_recording() {
+                                    DebugLogger::log_pipeline_error("audio_manager", &format!("Error stopping capture: {}", e));
+                                }
+                            }
+                            if let Some(r) = reply {
+                                let _ = r.send(Ok(()));
+                            }
+                        }
+                    }
+                }
+                DebugLogger::log_info("Audio manager thread exiting");
+            });
+            Arc::new(Mutex::new(cmd_tx)) as AudioManagerHandle
+        })
         .invoke_handler(tauri::generate_handler![
             greet, 
             start_recording, 
@@ -971,6 +1092,9 @@ pub fn run() {
             store_api_key,
             get_api_key,
             has_api_key,
+            debug_api_key_info,
+            export_legacy_api_key,
+            delete_legacy_api_key,
             get_available_audio_devices,
             test_audio_capture,
             get_recording_status,

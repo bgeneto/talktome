@@ -368,6 +368,28 @@ function createSettingsStore() {
       }
     },
 
+    // Migration helpers for legacy API key -> Stronghold
+    async exportLegacyApiKey(): Promise<string | null> {
+      try {
+        const res = await invoke('export_legacy_api_key');
+        return (res as string) || null;
+      } catch (err) {
+        console.log('No legacy API key exported or error:', err);
+        return null;
+      }
+    },
+
+    async deleteLegacyApiKey(): Promise<boolean> {
+      try {
+        await invoke('delete_legacy_api_key');
+        return true;
+      } catch (err) {
+        console.error('Failed to delete legacy api.key:', err);
+        return false;
+      }
+    },
+
+
     async fetchAvailableModels(endpoint?: string, apiKey?: string): Promise<{ success: boolean; models: string[]; message?: string }> {
       try {
         // Use provided parameters or fall back to current settings

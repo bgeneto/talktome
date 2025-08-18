@@ -2,6 +2,8 @@ use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::PathBuf;
 use tauri::{AppHandle, Manager};
+use serde_json::json;
+use keyring::Entry;
 
 #[derive(Serialize, Deserialize, Clone)]
 pub struct AppSettings {
@@ -56,30 +58,44 @@ impl AppSettings {
 
     /// Get API key from secure file storage (temporary solution, can be upgraded to Stronghold later)
     pub fn get_api_key(&self, app_handle: &AppHandle) -> Result<String, String> {
-        let api_key_path = Self::get_api_key_path(app_handle)?;
-        
-        if api_key_path.exists() {
-            fs::read_to_string(api_key_path)
-                .map_err(|e| format!("Failed to read API key: {}", e))
-                .map(|key| key.trim().to_string())
-        } else {
-            Err("API key not found".to_string())
+        // First try OS keyring
+        let service = "talktome_api_key";
+        let username = whoami::username();
+        let entry = Entry::new(service, &username);
+        match entry.get_password() {
+            Ok(pw) => return Ok(pw),
+            Err(_) => {
+                // Fallthrough to try legacy file-based key (migration path)
+            }
         }
+
+        // Legacy fallback: check plain api.key file for migration support
+        let api_key_path = Self::get_api_key_path(app_handle)?;
+        if api_key_path.exists() {
+            let content = fs::read_to_string(&api_key_path)
+                .map_err(|e| format!("Failed to read legacy API key at {}: {}", api_key_path.display(), e))?;
+            let key = content.trim().to_string();
+            // Attempt to store in keyring for future secure access
+            if let Err(e) = entry.set_password(&key) {
+                // Log but still return the key so caller can continue
+                return Err(format!("Failed to migrate API key to secure storage: {}", e));
+            }
+            // On successful migration, attempt to securely delete the legacy file
+            let _ = fs::remove_file(&api_key_path);
+            return Ok(key);
+        }
+
+        Err(format!("API key not found in secure storage or legacy file"))
     }
 
     /// Store API key securely
     pub fn store_api_key(&self, app_handle: &AppHandle, api_key: String) -> Result<(), String> {
-        let api_key_path = Self::get_api_key_path(app_handle)?;
-        
-        // Create directory if it doesn't exist
-        if let Some(parent) = api_key_path.parent() {
-            fs::create_dir_all(parent).map_err(|e| e.to_string())?;
-        }
-        
-        fs::write(api_key_path, api_key.trim())
-            .map_err(|e| format!("Failed to store API key: {}", e))?;
-        
-        Ok(())
+    // Store in OS keyring
+    let service = "talktome_api_key";
+    let username = whoami::username();
+    let entry = Entry::new(service, &username);
+    entry.set_password(api_key.trim()).map_err(|e| format!("Failed to store API key in secure storage: {}", e))?;
+    Ok(())
     }
 
     /// Check if API key exists
@@ -111,5 +127,67 @@ impl AppSettings {
         // Fallback to app data directory
         let app_dir = app_handle.path().app_data_dir().map_err(|e| e.to_string())?;
         Ok(app_dir)
+    }
+
+    /// Diagnostic helper for debugging API key storage issues
+    /// Returns JSON with path, exists, size (bytes) and a masked preview of the key
+    pub fn debug_api_key_info(&self, app_handle: &AppHandle) -> Result<serde_json::Value, String> {
+        let api_key_path = Self::get_api_key_path(app_handle)?;
+        let exists = api_key_path.exists();
+        if exists {
+            match fs::metadata(&api_key_path) {
+                Ok(meta) => {
+                    let size = meta.len();
+                    match fs::read_to_string(&api_key_path) {
+                        Ok(content) => {
+                            let trimmed = content.trim();
+                            let preview = if trimmed.len() <= 10 {
+                                // show as-is but masked
+                                format!("{}", "*".repeat(trimmed.len()))
+                            } else {
+                                let start = &trimmed[..4];
+                                let end = &trimmed[trimmed.len()-4..];
+                                format!("{}{}{}", start, "*".repeat(8), end)
+                            };
+                            Ok(json!({
+                                "path": api_key_path.display().to_string(),
+                                "exists": true,
+                                "size": size,
+                                "preview": preview
+                            }))
+                        }
+                        Err(e) => Err(format!("Failed to read API key at {}: {}", api_key_path.display(), e)),
+                    }
+                }
+                Err(e) => Err(format!("Failed to stat API key at {}: {}", api_key_path.display(), e)),
+            }
+        } else {
+            Ok(json!({
+                "path": api_key_path.display().to_string(),
+                "exists": false,
+            }))
+        }
+    }
+
+    /// Export the legacy plain-text API key (if present) so the frontend can migrate it into Stronghold.
+    /// Returns Ok(Some(key)) if a legacy key was found, Ok(None) if not found.
+    pub fn export_legacy_api_key(&self, app_handle: &AppHandle) -> Result<Option<String>, String> {
+        let api_key_path = Self::get_api_key_path(app_handle)?;
+        if api_key_path.exists() {
+            let content = fs::read_to_string(&api_key_path)
+                .map_err(|e| format!("Failed to read legacy API key at {}: {}", api_key_path.display(), e))?;
+            Ok(Some(content.trim().to_string()))
+        } else {
+            Ok(None)
+        }
+    }
+
+    /// Delete the legacy plain-text API key file after successful migration.
+    pub fn delete_legacy_api_key(&self, app_handle: &AppHandle) -> Result<(), String> {
+        let api_key_path = Self::get_api_key_path(app_handle)?;
+        if api_key_path.exists() {
+            fs::remove_file(&api_key_path).map_err(|e| format!("Failed to delete legacy API key at {}: {}", api_key_path.display(), e))?;
+        }
+        Ok(())
     }
 }
