@@ -313,6 +313,7 @@
         translationEnabled: currentSettings.translationLanguage !== "none",
         translationModel: currentSettings.translationModel,
         textInsertionEnabled: currentSettings.textInsertionEnabled,
+        audioChunkingEnabled: currentSettings.audioChunkingEnabled,
       });
       isRecording = true;
       isListening = true;

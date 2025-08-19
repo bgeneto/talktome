@@ -267,7 +267,8 @@ async fn start_recording(
     auto_mute: bool,
     translation_enabled: bool,
     translation_model: String,
-    text_insertion_enabled: bool
+    text_insertion_enabled: bool,
+    audio_chunking_enabled: bool
 ) -> Result<(), String> {
     // Check if already recording
     {
@@ -279,8 +280,8 @@ async fn start_recording(
 
     // Get API key (use default AppSettings instance for the method)
     DebugLogger::log_info("=== PIPELINE START: start_recording() called ===");
-    DebugLogger::log_info(&format!("Recording params: spoken_lang={}, translation_lang={}, endpoint={}, stt_model={}, auto_mute={}, translation_enabled={}, text_insertion_enabled={}", 
-        spoken_language, translation_language, api_endpoint, stt_model, auto_mute, translation_enabled, text_insertion_enabled));
+    DebugLogger::log_info(&format!("Recording params: spoken_lang={}, translation_lang={}, endpoint={}, stt_model={}, auto_mute={}, translation_enabled={}, text_insertion_enabled={}, audio_chunking_enabled={}", 
+        spoken_language, translation_language, api_endpoint, stt_model, auto_mute, translation_enabled, text_insertion_enabled, audio_chunking_enabled));
     
     let settings_for_api = AppSettings::default();
     let api_key = settings_for_api.get_api_key(&app).map_err(|e| {
@@ -308,6 +309,7 @@ async fn start_recording(
         translation_enabled,
         debug_logging: false, // Will be set properly by frontend debug logging state
         text_insertion_enabled,
+        audio_chunking_enabled,
     };
     
     // Request the audio manager (single-thread owner) to start capture and return the receiver
@@ -466,31 +468,38 @@ async fn start_recording(
         DebugLogger::log_info(&format!("Pipeline settings: translation_enabled={}, spoken_lang={}, target_lang={}", 
             settings.translation_enabled, settings.spoken_language, settings.translation_language));
         
-        DebugLogger::log_info("About to enter audio chunk processing loop");
-        DebugLogger::log_info("Waiting for first audio chunk...");
+        DebugLogger::log_info("About to enter audio processing pipeline");
+        DebugLogger::log_info(&format!("Audio chunking mode: {}", if settings.audio_chunking_enabled { "ENABLED (real-time chunks)" } else { "DISABLED (single recording)" }));
         
-        // Aggregation state: accumulate text and flush on utterance boundary
-        use std::time::{Duration, Instant};
-        let mut agg_text = String::new();
-        let mut last_speech = Instant::now();
-        let idle_threshold = Duration::from_millis(700);
-        let mut utterance_inserted = false; // Track if current utterance was already inserted
+        if settings.audio_chunking_enabled {
+            // === CHUNKED MODE: Real-time processing ===
+            DebugLogger::log_info("Waiting for first audio chunk...");
+            
+            // Move audio_rx into chunked mode
+            let audio_rx = audio_rx;
+            
+            // Aggregation state: accumulate text and flush on utterance boundary
+            use std::time::{Duration, Instant};
+            let mut agg_text = String::new();
+            let mut last_speech = Instant::now();
+            let idle_threshold = Duration::from_millis(700);
+            let mut utterance_inserted = false; // Track if current utterance was already inserted
 
-        fn append_dedup(agg: &mut String, next: &str) {
-            // Token-aware suffix/prefix dedup: use last up to 12 chars as heuristic
-            let take = agg.chars().rev().take(12).collect::<String>();
-            let tail: String = take.chars().rev().collect();
-            if !tail.is_empty() && next.starts_with(&tail) {
-                agg.push_str(&next[tail.len()..]);
-            } else {
-                if !agg.is_empty() { agg.push(' '); }
-                agg.push_str(next);
+            fn append_dedup(agg: &mut String, next: &str) {
+                // Token-aware suffix/prefix dedup: use last up to 12 chars as heuristic
+                let take = agg.chars().rev().take(12).collect::<String>();
+                let tail: String = take.chars().rev().collect();
+                if !tail.is_empty() && next.starts_with(&tail) {
+                    agg.push_str(&next[tail.len()..]);
+                } else {
+                    if !agg.is_empty() { agg.push(' '); }
+                    agg.push_str(next);
+                }
             }
-        }
 
-        // Process audio chunks with timeout to detect stop/idle
-        loop {
-            use std::sync::mpsc::RecvTimeoutError;
+            // Process audio chunks with timeout to detect stop/idle
+            loop {
+                use std::sync::mpsc::RecvTimeoutError;
             
             // Check stop signal first
             match stop_rx.try_recv() {
@@ -717,7 +726,174 @@ async fn start_recording(
             }));
         }
 
-        // Clean up recording state
+        } else {
+            // === SINGLE RECORDING MODE: Capture entire session ===
+            DebugLogger::log_info("Starting single recording session - collecting all audio data...");
+            
+            // Move audio_rx into single recording mode
+            let audio_rx = audio_rx;
+            
+            // Spawn a separate task for single recording mode to avoid blocking UI
+            let app_single = app.clone();
+            let stop_rx_single = stop_rx;
+            let recording_state_single = recording_state_clone.clone();
+            let stt_service_single = stt_service;
+            let translation_service_single = translation_service;
+            let settings_single = settings.clone();
+            let text_insertion_tx_single = text_insertion_tx.clone();
+            
+            tokio::spawn(async move {
+                let mut all_audio_data: Vec<f32> = Vec::new();
+                let mut sample_rate = 48000; // Default sample rate, will be updated from first chunk
+                
+                // Collect all audio data until recording stops
+                loop {
+                    use std::sync::mpsc::RecvTimeoutError;
+                    
+                    // Check stop signal first
+                    match stop_rx_single.try_recv() {
+                        Ok(_) => {
+                            DebugLogger::log_info("STOP_REASON: Stop signal received manually, draining remaining chunks before ending single recording session");
+                            // Drain remaining chunks from the channel to prevent backup
+                            let drain_start = std::time::Instant::now();
+                            let mut drained_count = 0;
+                            while drain_start.elapsed() < std::time::Duration::from_millis(500) {
+                                match audio_rx.try_recv() {
+                                    Ok(_) => drained_count += 1,
+                                    Err(_) => break,
+                                }
+                            }
+                            if drained_count > 0 {
+                                DebugLogger::log_info(&format!("Single recording: drained {} remaining chunks from audio channel", drained_count));
+                            }
+                            break;
+                        }
+                        Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                            DebugLogger::log_info("STOP_REASON: Stop signal channel disconnected, draining remaining chunks before ending single recording session");
+                            // Drain remaining chunks from the channel to prevent backup
+                            let drain_start = std::time::Instant::now();
+                            let mut drained_count = 0;
+                            while drain_start.elapsed() < std::time::Duration::from_millis(500) {
+                                match audio_rx.try_recv() {
+                                    Ok(_) => drained_count += 1,
+                                    Err(_) => break,
+                                }
+                            }
+                            if drained_count > 0 {
+                                DebugLogger::log_info(&format!("Single recording: drained {} remaining chunks from audio channel", drained_count));
+                            }
+                            break;
+                        }
+                        Err(std::sync::mpsc::TryRecvError::Empty) => {
+                            // No stop signal, continue collecting
+                        }
+                    }
+                    
+                    let audio_chunk = match audio_rx.recv_timeout(std::time::Duration::from_millis(200)) {
+                        Ok(chunk) => chunk,
+                        Err(RecvTimeoutError::Timeout) => {
+                            // Check if recording state changed
+                            let stop = {
+                                let state = recording_state_single.lock().unwrap();
+                                !*state
+                            };
+                            if stop {
+                                DebugLogger::log_info("STOP_REASON: Recording state set to false (single recording mode), draining remaining chunks before ending session");
+                                // Drain remaining chunks from the channel to prevent backup
+                                let drain_start = std::time::Instant::now();
+                                let mut drained_count = 0;
+                                while drain_start.elapsed() < std::time::Duration::from_millis(500) {
+                                    match audio_rx.try_recv() {
+                                        Ok(_) => drained_count += 1,
+                                        Err(_) => break,
+                                    }
+                                }
+                                if drained_count > 0 {
+                                    DebugLogger::log_info(&format!("Single recording: drained {} remaining chunks from audio channel", drained_count));
+                                }
+                                break;
+                            }
+                            continue; // Keep waiting for more audio
+                        }
+                        Err(RecvTimeoutError::Disconnected) => {
+                            DebugLogger::log_info("STOP_REASON: Audio channel disconnected, ending single recording session");
+                            break;
+                        }
+                    };
+                    
+                    // Collect audio data from this chunk
+                    if !audio_chunk.data.is_empty() {
+                        sample_rate = audio_chunk.sample_rate;
+                        all_audio_data.extend_from_slice(&audio_chunk.data);
+                        DebugLogger::log_info(&format!("Single recording: collected {} samples, total: {} samples ({:.1}s)", 
+                            audio_chunk.data.len(), all_audio_data.len(), all_audio_data.len() as f32 / sample_rate as f32));
+                    }
+                }
+                
+                // Process the complete audio recording
+                if !all_audio_data.is_empty() {
+                    DebugLogger::log_info(&format!("Single recording complete: {} samples ({:.1}s) at {}Hz", 
+                        all_audio_data.len(), all_audio_data.len() as f32 / sample_rate as f32, sample_rate));
+                    
+                    // Convert to WAV format and send to STT service
+                    DebugLogger::log_info("Sending complete recording to STT service...");
+                    
+                    match stt_service_single.transcribe_chunk(all_audio_data, sample_rate).await {
+                            Ok(transcription) => {
+                                DebugLogger::log_info(&format!("STT complete transcription: '{}'", transcription));
+                                
+                                let final_text = if let Some(ref translation_service) = translation_service_single {
+                                    match translation_service.process_text(
+                                        &transcription,
+                                        &settings_single.spoken_language,
+                                        &settings_single.translation_language,
+                                        settings_single.translation_enabled
+                                    ).await {
+                                        Ok(processed_text) => {
+                                            DebugLogger::log_translation_response(true, Some(&processed_text), None, None);
+                                            processed_text
+                                        },
+                                        Err(e) => {
+                                            DebugLogger::log_translation_response(false, None, Some(&e), None);
+                                            DebugLogger::log_pipeline_error("translation", &e);
+                                            let _ = app_single.emit("processing-error", format!("Translation Error - Using fallback: {}", e));
+                                            transcription.clone()
+                                        }
+                                    }
+                                } else {
+                                    transcription.clone()
+                                };
+                                
+                                // Insert text into focused application
+                                if settings_single.text_insertion_enabled {
+                                    DebugLogger::log_info("TEXT_INSERTION: queueing complete transcription for insertion");
+                                    if let Err(e) = text_insertion_tx_single.send(final_text.clone()) {
+                                        DebugLogger::log_pipeline_error("text_insertion", &format!("failed to queue complete transcription: {}", e));
+                                    } else {
+                                        DebugLogger::log_info("TEXT_INSERTION: queued complete transcription");
+                                    }
+                                } else {
+                                    DebugLogger::log_info("TEXT_INSERTION: skipped (text insertion disabled)");
+                                }
+                                
+                                // Emit complete transcription to frontend
+                                let _ = app_single.emit("transcribed-text", serde_json::json!({
+                                    "raw": transcription,
+                                    "final": final_text
+                                }));
+                            },
+                            Err(e) => {
+                                DebugLogger::log_pipeline_error("stt", &format!("STT processing failed: {}", e));
+                                let _ = app_single.emit("processing-error", format!("STT Error: {}", e));
+                            }
+                        }
+                } else {
+                    DebugLogger::log_info("Single recording session ended with no audio data collected");
+                }
+            });
+        }
+
+        // Common cleanup for both modes
         {
             let mut state = recording_state_clone.lock().unwrap();
             *state = false;

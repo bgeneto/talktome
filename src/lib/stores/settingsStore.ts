@@ -17,6 +17,7 @@ interface Settings {
   autoMute: boolean;
   debugLogging: boolean;
   textInsertionEnabled: boolean;
+  audioChunkingEnabled: boolean;
   quickAccessLanguages: string[];
   vad: {
     speechThreshold: number;      // Energy threshold for speech detection
@@ -44,6 +45,7 @@ const defaultSettings: Settings = {
   autoMute: true,
   debugLogging: false,
   textInsertionEnabled: true,
+  audioChunkingEnabled: true, // Default to true for backward compatibility
   quickAccessLanguages: [],
   vad: {
     speechThreshold: 0.001,       // Sensitive for real-time
@@ -237,6 +239,19 @@ function createSettingsStore() {
     setTextInsertionEnabled: (enabled: boolean) => {
       update(settings => {
         const newSettings = { ...settings, textInsertionEnabled: enabled };
+        // SECURITY: Never store API key in localStorage
+        const settingsForLocalStorage = { ...newSettings, apiKey: "" };
+        localStorage.setItem('talktome-settings', JSON.stringify(settingsForLocalStorage));
+        // Sync to backend
+        setTimeout(() => {
+          syncToBackend();
+        }, 0);
+        return newSettings;
+      });
+    },
+    setAudioChunkingEnabled: (enabled: boolean) => {
+      update(settings => {
+        const newSettings = { ...settings, audioChunkingEnabled: enabled };
         // SECURITY: Never store API key in localStorage
         const settingsForLocalStorage = { ...newSettings, apiKey: "" };
         localStorage.setItem('talktome-settings', JSON.stringify(settingsForLocalStorage));

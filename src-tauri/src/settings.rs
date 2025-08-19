@@ -20,6 +20,7 @@ pub struct AppSettings {
     pub translation_enabled: bool,
     pub debug_logging: bool,
     pub text_insertion_enabled: bool,
+    pub audio_chunking_enabled: bool,
     // SECURITY: API key is NEVER stored in this struct or localStorage
     // It's handled separately via secure file storage (backend only)
     // Frontend stores it only in memory during runtime
@@ -50,6 +51,7 @@ impl Default for AppSettings {
             translation_enabled: false,
             debug_logging: false,
             text_insertion_enabled: true,
+            audio_chunking_enabled: true, // Default to true for backward compatibility
         }
     }
 }
