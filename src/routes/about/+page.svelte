@@ -1,8 +1,9 @@
 <script lang="ts">
   let appVersion = "0.2.0";
-  let buildDate = "2025-08-13";
+  let buildDate = "2025-08-19";
   let platform = "Windows";
   let architecture = "x64";
+  let developer = "bgeneto";
 
   const features = [
     "Real-time speech-to-text transcription",
@@ -85,6 +86,7 @@ Tauri Version: 2.0.0
         <p>Version {appVersion}</p>
         <p>Built on {buildDate}</p>
         <p>{platform} {architecture}</p>
+        <p>Developer: {developer}</p>
       </div>
     </div>
   </section>
