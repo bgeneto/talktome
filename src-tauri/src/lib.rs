@@ -74,15 +74,33 @@ fn parse_hotkey(hotkey: &str) -> Result<Shortcut, String> {
             "ctrl" | "control" => modifiers |= Modifiers::CONTROL,
             "alt" => modifiers |= Modifiers::ALT,
             "shift" => modifiers |= Modifiers::SHIFT,
-            "win" | "super" | "cmd" => modifiers |= Modifiers::SUPER,
+            "win" | "super" | "cmd" | "meta" => modifiers |= Modifiers::SUPER,
             key => {
                 // Try to parse the key
                 let code = match key.to_lowercase().as_str() {
+                    // Special keys
                     "space" => Code::Space,
                     "escape" | "esc" => Code::Escape,
                     "enter" | "return" => Code::Enter,
                     "backspace" => Code::Backspace,
                     "tab" => Code::Tab,
+                    "delete" | "del" => Code::Delete,
+                    "insert" | "ins" => Code::Insert,
+                    "home" => Code::Home,
+                    "end" => Code::End,
+                    "pageup" | "pgup" => Code::PageUp,
+                    "pagedown" | "pgdn" => Code::PageDown,
+                    "arrowup" | "up" => Code::ArrowUp,
+                    "arrowdown" | "down" => Code::ArrowDown,
+                    "arrowleft" | "left" => Code::ArrowLeft,
+                    "arrowright" | "right" => Code::ArrowRight,
+                    "capslock" => Code::CapsLock,
+                    "numlock" => Code::NumLock,
+                    "scrolllock" => Code::ScrollLock,
+                    "printscreen" | "prtsc" => Code::PrintScreen,
+                    "pause" => Code::Pause,
+                    "contextmenu" | "menu" => Code::ContextMenu,
+                    // Function keys
                     "f1" => Code::F1,
                     "f2" => Code::F2,
                     "f3" => Code::F3,
@@ -95,7 +113,19 @@ fn parse_hotkey(hotkey: &str) -> Result<Shortcut, String> {
                     "f10" => Code::F10,
                     "f11" => Code::F11,
                     "f12" => Code::F12,
-                    // Single character keys
+                    "f13" => Code::F13,
+                    "f14" => Code::F14,
+                    "f15" => Code::F15,
+                    "f16" => Code::F16,
+                    "f17" => Code::F17,
+                    "f18" => Code::F18,
+                    "f19" => Code::F19,
+                    "f20" => Code::F20,
+                    "f21" => Code::F21,
+                    "f22" => Code::F22,
+                    "f23" => Code::F23,
+                    "f24" => Code::F24,
+                    // Letter keys
                     "a" => Code::KeyA,
                     "b" => Code::KeyB,
                     "c" => Code::KeyC,
@@ -122,6 +152,7 @@ fn parse_hotkey(hotkey: &str) -> Result<Shortcut, String> {
                     "x" => Code::KeyX,
                     "y" => Code::KeyY,
                     "z" => Code::KeyZ,
+                    // Number keys
                     "0" => Code::Digit0,
                     "1" => Code::Digit1,
                     "2" => Code::Digit2,
@@ -132,11 +163,59 @@ fn parse_hotkey(hotkey: &str) -> Result<Shortcut, String> {
                     "7" => Code::Digit7,
                     "8" => Code::Digit8,
                     "9" => Code::Digit9,
+                    // Numpad keys
+                    "numpad0" => Code::Numpad0,
+                    "numpad1" => Code::Numpad1,
+                    "numpad2" => Code::Numpad2,
+                    "numpad3" => Code::Numpad3,
+                    "numpad4" => Code::Numpad4,
+                    "numpad5" => Code::Numpad5,
+                    "numpad6" => Code::Numpad6,
+                    "numpad7" => Code::Numpad7,
+                    "numpad8" => Code::Numpad8,
+                    "numpad9" => Code::Numpad9,
+                    "numpadmultiply" | "numpadadd" | "numpadsubtract" | "numpaddecimal" | "numpaddivide" => {
+                        match key.to_lowercase().as_str() {
+                            "numpadmultiply" => Code::NumpadMultiply,
+                            "numpadadd" => Code::NumpadAdd,
+                            "numpadsubtract" => Code::NumpadSubtract,
+                            "numpaddecimal" => Code::NumpadDecimal,
+                            "numpaddivide" => Code::NumpadDivide,
+                            _ => return Err(format!("Unsupported numpad key: {}", key)),
+                        }
+                    }
+                    // Symbol keys
+                    "minus" | "-" => Code::Minus,
+                    "equal" | "=" => Code::Equal,
+                    "bracketleft" | "[" => Code::BracketLeft,
+                    "bracketright" | "]" => Code::BracketRight,
+                    "semicolon" | ";" => Code::Semicolon,
+                    "quote" | "'" => Code::Quote,
+                    "backquote" | "`" => Code::Backquote,
+                    "comma" | "," => Code::Comma,
+                    "period" | "." => Code::Period,
+                    "slash" | "/" => Code::Slash,
+                    "backslash" | "\\" => Code::Backslash,
                     _ => return Err(format!("Unsupported key: {}", key)),
                 };
                 key_code = Some(code);
                 break;
             }
+        }
+    }
+    
+    // Handle modifier-only combinations
+    // For combinations like Ctrl+Win or Shift+Ctrl+Alt, we need to use a placeholder key
+    // We'll use a key that's unlikely to conflict with normal usage
+    if key_code.is_none() {
+        // Check if we have valid modifier combinations
+        if !modifiers.is_empty() {
+            // Use F24 as a placeholder key for modifier-only combinations
+            // F24 is rarely used and should work well as a placeholder
+            key_code = Some(Code::F24);
+            DebugLogger::log_info(&format!("Using F24 as placeholder for modifier-only combination: {:?}", modifiers));
+        } else {
+            return Err("No modifiers or keys specified in hotkey".to_string());
         }
     }
     
@@ -162,6 +241,19 @@ fn clear_audio_manager_last_error() {
     }
 }
 
+/// Test hotkey parsing (for debugging)
+#[tauri::command]
+fn test_hotkey_parsing(hotkey: String) -> Result<String, String> {
+    match parse_hotkey(&hotkey) {
+        Ok(shortcut) => {
+            Ok(format!("Successfully parsed hotkey '{}': {:?}", hotkey, shortcut))
+        }
+        Err(e) => {
+            Err(format!("Failed to parse hotkey '{}': {}", hotkey, e))
+        }
+    }
+}
+
 // Command to register hotkeys
 #[tauri::command]
 async fn register_hotkeys(
@@ -171,6 +263,11 @@ async fn register_hotkeys(
 ) -> Result<(), String> {
     let global_shortcut = app.global_shortcut();
     DebugLogger::log_info(&format!("register_hotkeys called, hotkeys_count={}", hotkeys.len()));
+    
+    // Log each hotkey being registered
+    for (action, hotkey_str) in &hotkeys {
+        DebugLogger::log_info(&format!("Attempting to register hotkey: action='{}', hotkey='{}'", action, hotkey_str));
+    }
     
     // Unregister existing hotkeys
     {
@@ -190,8 +287,13 @@ async fn register_hotkeys(
         }
         
         let shortcut = parse_hotkey(hotkey_str).map_err(|e| {
-            format!("Failed to parse hotkey '{}' for action '{}': {}", hotkey_str, action, e)
+            let error_msg = format!("Failed to parse hotkey '{}' for action '{}': {}", hotkey_str, action, e);
+            DebugLogger::log_info(&error_msg);
+            error_msg
         })?;
+        
+        DebugLogger::log_info(&format!("Successfully parsed hotkey '{}' for action '{}': {:?}", hotkey_str, action, shortcut));
+        
         // Register handler to emit an event when the shortcut is triggered
         let action_clone = action.clone();
         let app_for_emit = app.clone();
@@ -1554,6 +1656,7 @@ pub fn run() {
             , get_audio_manager_last_error
             , clear_audio_manager_last_error
             , show_recording_timeout_notification
+            , test_hotkey_parsing
         ])
         .setup(|app| {
             // Initialize debug logging first (disabled by default, will be enabled by frontend)

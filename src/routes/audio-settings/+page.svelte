@@ -45,9 +45,9 @@
   async function saveAudioSettings() {
     if (saveSuccess) return;
 
-    console.log("Saving audio settings...", { 
-      selectedDevice, 
-      audioChunkingEnabled: $settings.audioChunkingEnabled 
+    console.log("Saving audio settings...", {
+      selectedDevice,
+      audioChunkingEnabled: $settings.audioChunkingEnabled,
     });
 
     try {
@@ -297,7 +297,7 @@
   </section>
 
   <!-- Audio Processing Settings -->
-  <section
+  <!-- <section
     class="bg-white dark:bg-gray-800 rounded-lg shadow-md p-6 border border-gray-200 dark:border-gray-700"
   >
     <h2 class="text-xl font-semibold text-gray-900 dark:text-white mb-4">
@@ -331,7 +331,7 @@
         </div>
       </div>
     </div>
-  </section>
+  </section> -->
 
   <!-- Save Button -->
   <div class="flex justify-end">

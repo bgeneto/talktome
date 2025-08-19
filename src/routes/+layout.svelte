@@ -4,10 +4,38 @@
   import { listen } from "@tauri-apps/api/event";
   import { goto } from "$app/navigation";
   import { page } from "$app/stores";
+  import { settings } from "../lib/stores/settingsStore";
 
   let isDarkMode = false;
   let sidebarCollapsed = false;
   let currentPage = "Home";
+
+  // Global theme application function
+  function applyGlobalTheme(theme: string) {
+    console.log("Layout: applying global theme:", theme);
+    let finalTheme: "light" | "dark" = "light";
+    
+    if (theme === "auto") {
+      const prefersDark =
+        window.matchMedia &&
+        window.matchMedia("(prefers-color-scheme: dark)").matches;
+      finalTheme = prefersDark ? "dark" : "light";
+    } else {
+      finalTheme = theme as "light" | "dark";
+    }
+
+    console.log("Layout: final theme:", finalTheme);
+    
+    if (finalTheme === "dark") {
+      document.documentElement.classList.add("dark");
+      isDarkMode = true;
+    } else {
+      document.documentElement.classList.remove("dark");
+      isDarkMode = false;
+    }
+    
+    localStorage.setItem("theme", finalTheme);
+  }
 
   // Navigation items matching the tray structure and SDD requirements
   const navigationItems = [
@@ -50,9 +78,12 @@
   ];
 
   onMount(async () => {
-    // Initialize theme
-    isDarkMode = localStorage.getItem("theme") === "dark";
-    updateTheme();
+    // Subscribe to settings changes and apply theme
+    const unsubscribe = settings.subscribe((currentSettings) => {
+      if (currentSettings.theme) {
+        applyGlobalTheme(currentSettings.theme);
+      }
+    });
 
     // Listen for tray events to show specific pages
     await listen("show-preferences", () => {
@@ -82,6 +113,11 @@
       );
       currentPage = item ? item.label : "Home";
     });
+
+    // Cleanup subscription on unmount
+    return () => {
+      unsubscribe();
+    };
   });
 
   function updateTheme() {
