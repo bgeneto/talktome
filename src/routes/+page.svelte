@@ -94,11 +94,13 @@
           }
         }
         if (finalTranscript) {
-          // Push raw transcript chunk into originalChunks and sync UI
+          // Push raw transcript chunk into originalChunks and sync UI immediately
           pushChunkDedup(originalChunks, finalTranscript);
-          syncDisplays();
-          // Translate and append the translation chunk into translatedChunks
-          translateText(finalTranscript, { append: true });
+          syncDisplays(); // Show transcribed text immediately
+          // Start translation asynchronously (don't wait)
+          translateText(finalTranscript, { append: true }).catch((err) => {
+            console.error("Background translation failed:", err);
+          });
         }
       };
 
@@ -216,45 +218,50 @@
             const finalText: string = payload;
             // For string payload, treat as original transcribed text only
             pushChunkDedup(originalChunks, finalText);
+            syncDisplays(); // Show transcribed text immediately
 
-            // Handle client-side translation if needed
+            // Handle client-side translation asynchronously (don't wait)
             const translationEnabledUI =
               selectedTargetLang &&
               selectedTargetLang !== "none" &&
               selectedTargetLang !== selectedSourceLang;
             if (translationEnabledUI) {
-              translateText(finalText, { append: true });
+              // Start translation in background, don't await
+              translateText(finalText, { append: true }).catch((err) => {
+                console.error("Background translation failed:", err);
+              });
             }
-            syncDisplays();
           } else if (payload) {
             // Handle structured payload with separate raw and final text
             const raw: string = payload.raw ?? "";
             const final: string = payload.final ?? "";
 
-            // Always add raw text to original chunks (this is the actual transcription)
+            // Always add raw text to original chunks and show immediately
             if (raw) {
               pushChunkDedup(originalChunks, raw);
+              syncDisplays(); // Show transcribed text immediately
             }
 
-            // Check if translation was enabled and we have different final text
-            const translationEnabledUI =
-              selectedTargetLang &&
-              selectedTargetLang !== "none" &&
-              selectedTargetLang !== selectedSourceLang;
-
-            if (translationEnabledUI && final && final !== raw) {
-              // Backend provided translated text, use it
+            // Check if we have processed/corrected text from backend
+            if (final && final !== raw) {
+              // Backend provided processed/corrected text (could be translation or just correction)
               pushChunkDedup(translatedChunks, final);
-            } else if (translationEnabledUI && raw) {
-              // Translation was enabled but backend didn't translate or returned same text
-              // Only try client-side translation if final is empty or same as raw
-              if (!final || final === raw) {
-                translateText(raw, { append: true });
+              syncDisplays(); // Update with processed text
+            } else {
+              // Check if client-side translation is needed
+              const translationEnabledUI =
+                selectedTargetLang &&
+                selectedTargetLang !== "none" &&
+                selectedTargetLang !== selectedSourceLang;
+
+              if (translationEnabledUI && raw) {
+                // Start client-side translation asynchronously (don't wait)
+                translateText(raw, { append: true }).catch((err) => {
+                  console.error("Background translation failed:", err);
+                });
               }
             }
-            // Note: If translation is disabled, we don't put anything in translatedChunks
-
-            syncDisplays();
+            // Note: translatedChunks now contains either translated text OR corrected text
           }
         }
       );
@@ -335,6 +342,7 @@
         sessionEnded = false;
       }
       useWebSpeechAPI = false;
+      showTrayNotification("Recording started");
     } catch (error) {
       console.error("Failed to start recording with Rust backend:", error);
       // Fallback to Web Speech API
@@ -373,6 +381,7 @@
         }
         useWebSpeechAPI = true;
         recognition.start();
+        showTrayNotification("Recording started");
       } catch (error) {
         console.error("Microphone access denied:", error);
         alert(
@@ -620,7 +629,7 @@
     <div class="bg-gray-50 dark:bg-gray-700 p-6 rounded-lg">
       <div class="flex items-center justify-between mb-4">
         <h3 class="text-lg font-semibold text-gray-900 dark:text-white">
-          Original Text
+          Original Transcription
         </h3>
         <button
           on:click={() => copyToClipboard(transcribedText)}
@@ -641,11 +650,11 @@
       </div>
     </div>
 
-    <!-- Translated Text -->
+    <!-- Corrected/Translated Text -->
     <div class="bg-gray-50 dark:bg-gray-700 p-6 rounded-lg">
       <div class="flex items-center justify-between mb-4">
         <h3 class="text-lg font-semibold text-gray-900 dark:text-white">
-          Translated Text
+          Processed/Translated Text
         </h3>
         <button
           on:click={() => copyToClipboard(translatedText)}
@@ -669,7 +678,7 @@
           <p class="text-gray-900 dark:text-gray-100">{translatedText}</p>
         {:else if !isTranslating}
           <p class="text-gray-500 dark:text-gray-400 italic">
-            Translated text will appear here...
+            Processed/translated text will appear here...
           </p>
         {/if}
       </div>

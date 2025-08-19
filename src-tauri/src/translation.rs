@@ -59,7 +59,7 @@ impl TranslationService {
             DebugLogger::log_info("TRANSLATION: Mode = Correction only");
             format!(
                 "Please correct any grammar, punctuation, and spelling errors in the following text. \
-                Keep the same language and meaning, just fix any errors and duplicated adjacent words. \
+                Keep the same language and meaning, just fix any errors, remove duplicated adjacent words and normalize spaces. \
                 Provide only the corrected text without any additional commentary:\n\n{}",
                 text
             )

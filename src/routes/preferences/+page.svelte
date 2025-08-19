@@ -709,6 +709,30 @@ Formatted: ${formatHotkeyFromEvent(e)}
           application using clipboard
         </p>
 
+        <!-- Test Text Insertion Button -->
+        {#if currentSettings.textInsertionEnabled}
+          <div class="ml-6 mt-2">
+            <button
+              type="button"
+              on:click={async () => {
+                try {
+                  await invoke("test_text_insertion", { testText: "Hello, this is a test of automatic text insertion!" });
+                  console.log("Text insertion test completed successfully");
+                } catch (error) {
+                  console.error("Text insertion test failed:", error);
+                  alert("Text insertion test failed: " + error);
+                }
+              }}
+              class="px-3 py-1 text-xs bg-blue-100 dark:bg-blue-800 text-blue-800 dark:text-blue-200 rounded hover:bg-blue-200 dark:hover:bg-blue-700 transition-colors"
+            >
+              Test Text Insertion
+            </button>
+            <p class="text-xs text-gray-500 dark:text-gray-400 mt-1">
+              Click to test if text insertion is working. Focus a text editor or input field first.
+            </p>
+          </div>
+        {/if}
+
         <div class="flex items-center mt-4">
           <label
             for="maxRecordingTime"

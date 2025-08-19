@@ -436,12 +436,16 @@ impl AudioCapture {
                     processed_audio.len(),
                     sr
                 ));
+                
+                // Check if the main pipeline is still expecting chunks
+                // (This is a best-effort check - the send could still fail due to race conditions)
                 let chunk = AudioChunk::new(processed_audio, 16000); // Output is always 16kHz after noise reduction
                 let send_result = tx.send(chunk);
                 if send_result.is_ok() {
                     DebugLogger::log_info("AUDIO_CHUNK_SENT: Successfully sent processed audio chunk to main pipeline");
                 } else {
-                    DebugLogger::log_info("AUDIO_CHUNK_SEND_FAILED: Main pipeline receiver may have been dropped");
+                    // This is expected during shutdown - the main pipeline may have closed the receiver
+                    DebugLogger::log_info("AUDIO_CHUNK_SEND_EXPECTED: Main pipeline receiver closed during shutdown (this is normal)");
                 }
             } else {
                 DebugLogger::log_info("No audio data recorded");

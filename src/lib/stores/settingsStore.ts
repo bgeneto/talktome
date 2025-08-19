@@ -79,6 +79,8 @@ function createSettingsStore() {
         hotkeys: mergedHotkeys,
         // SECURITY: Never load API key from localStorage - always empty it
         apiKey: "",
+        // FORCE: Always disable audio chunking for reliability (ignore cached value)
+        audioChunkingEnabled: false,
       } as Settings;
 
       // SECURITY: Remove API key from localStorage if it exists (migration from insecure storage)
@@ -87,6 +89,7 @@ function createSettingsStore() {
           ...parsed,
           hotkeys: mergedHotkeys,
           apiKey: "",
+          audioChunkingEnabled: false, // FORCE: Always false in localStorage too
         };
         localStorage.setItem(
           "talktome-settings",
@@ -157,6 +160,7 @@ function createSettingsStore() {
         push_to_talk_hotkey: currentSettings.hotkeys.pushToTalk,
         hands_free_hotkey: currentSettings.hotkeys.handsFree,
         text_insertion_enabled: currentSettings.textInsertionEnabled,
+        audio_chunking_enabled: false, // FORCE: Always send false to backend for reliability
       });
     } catch (error) {
       console.error("Failed to sync settings to backend:", error);
@@ -293,7 +297,8 @@ function createSettingsStore() {
     },
     setAudioChunkingEnabled: (enabled: boolean) => {
       update((settings) => {
-        const newSettings = { ...settings, audioChunkingEnabled: enabled };
+        // FORCE: Always keep audio chunking disabled for reliability (ignore input parameter)
+        const newSettings = { ...settings, audioChunkingEnabled: false };
         // SECURITY: Never store API key in localStorage
         const settingsForLocalStorage = { ...newSettings, apiKey: "" };
         localStorage.setItem(

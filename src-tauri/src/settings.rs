@@ -52,7 +52,7 @@ impl Default for AppSettings {
             translation_enabled: false,
             debug_logging: false,
             text_insertion_enabled: true,
-            audio_chunking_enabled: true, // Default to true for backward compatibility
+            audio_chunking_enabled: false, // Default to false - single recording mode only
             max_recording_time_minutes: 5, // Default to 5 minutes maximum recording time
         }
     }

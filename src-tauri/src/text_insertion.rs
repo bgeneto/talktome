@@ -1,4 +1,5 @@
-use std::process::Command;
+use arboard::Clipboard;
+use enigo::{Enigo, Key, Keyboard, Settings};
 use crate::debug_logger::DebugLogger;
 
 pub struct TextInsertionService;
@@ -49,206 +50,144 @@ impl TextInsertionService {
 
     #[cfg(target_os = "windows")]
     fn insert_text_windows(&self, text: &str) -> Result<(), String> {
-        DebugLogger::log_info("TEXT_INSERTION: Windows - Using clipboard-paste method");
+        DebugLogger::log_info("TEXT_INSERTION: Windows - Using native Rust clipboard + enigo keyboard simulation");
         
-        // Step 1: Set clipboard content
-        DebugLogger::log_info("TEXT_INSERTION: Windows - Setting clipboard content");
-        let escaped_text = text.replace("\"", "\\\"").replace("`", "``");
-        let clipboard_script = format!(
-            "Set-Clipboard -Value \"{}\"",
-            escaped_text
-        );
-        DebugLogger::log_info(&format!("TEXT_INSERTION: Windows - Clipboard script: '{}'", clipboard_script));
+        DebugLogger::log_info(&format!("TEXT_INSERTION: Windows - Setting clipboard content for text: '{}'", text));
         
-        let clipboard_output = Command::new("powershell")
-            .arg("-Command")
-            .arg(&clipboard_script)
-            .output()
-            .map_err(|e| {
-                let error_msg = format!("Clipboard set failed: {}", e);
-                DebugLogger::log_pipeline_error("text_insertion_clipboard", &error_msg);
-                error_msg
-            })?;
-            
-        if !clipboard_output.status.success() {
-            let error_msg = format!("Clipboard set failed with status: {}", clipboard_output.status);
-            DebugLogger::log_pipeline_error("text_insertion_clipboard", &error_msg);
-            return Err(error_msg);
+        // Try native Rust approach first (much faster and more reliable)
+        match self.insert_text_native(text) {
+            Ok(()) => {
+                DebugLogger::log_info("TEXT_INSERTION: Windows - Native Rust method succeeded");
+                return Ok(());
+            }
+            Err(e) => {
+                DebugLogger::log_info(&format!("TEXT_INSERTION: Windows - Native method failed: {}, trying PowerShell fallback", e));
+                // Continue to PowerShell fallback below
+            }
         }
         
-        DebugLogger::log_info("TEXT_INSERTION: Windows - Clipboard content set successfully");
+        // Fallback to PowerShell if native approach fails
+        DebugLogger::log_info("TEXT_INSERTION: Windows - Using PowerShell fallback method");
+        self.insert_text_windows_powershell_fallback(text)
+    }
+
+    // Native Rust implementation (primary method)
+    fn insert_text_native(&self, text: &str) -> Result<(), String> {
+        // Step 1: Set clipboard content using arboard (much faster than PowerShell)
+        let mut clipboard = Clipboard::new().map_err(|e| {
+            format!("Failed to initialize clipboard: {}", e)
+        })?;
         
-        // Step 2: Send Ctrl+V keystroke
-        DebugLogger::log_info("TEXT_INSERTION: Windows - Sending Ctrl+V keystroke");
-        let paste_script = "Add-Type -AssemblyName System.Windows.Forms; [System.Windows.Forms.SendKeys]::SendWait(\"^v\")";
+        clipboard.set_text(text).map_err(|e| {
+            format!("Failed to set clipboard content: {}", e)
+        })?;
         
-        let paste_output = Command::new("powershell")
-            .arg("-Command")
-            .arg(paste_script)
-            .output()
-            .map_err(|e| {
-                let error_msg = format!("Paste keystroke failed: {}", e);
-                DebugLogger::log_pipeline_error("text_insertion_paste", &error_msg);
-                error_msg
-            })?;
-            
-        DebugLogger::log_info(&format!("TEXT_INSERTION: Windows - Paste output: stdout='{}', stderr='{}'", 
-            String::from_utf8_lossy(&paste_output.stdout), String::from_utf8_lossy(&paste_output.stderr)));
-        DebugLogger::log_info(&format!("TEXT_INSERTION: Windows - Paste exit status: {}", paste_output.status));
+        DebugLogger::log_info("TEXT_INSERTION: Native - Clipboard content set successfully with arboard");
         
-        if !paste_output.status.success() {
-            let error_msg = format!("Paste keystroke failed with status: {}", paste_output.status);
-            DebugLogger::log_pipeline_error("text_insertion_paste", &error_msg);
-            return Err(error_msg);
-        }
+        // Step 2: Send Ctrl+V keystroke using enigo (much more reliable than SendKeys)
+        DebugLogger::log_info("TEXT_INSERTION: Native - Sending keystroke with enigo");
         
-        DebugLogger::log_info("TEXT_INSERTION: Windows - Clipboard-paste insertion completed successfully");
+        // Small delay to ensure clipboard is ready
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        
+        let mut enigo = Enigo::new(&Settings::default()).map_err(|e| {
+            format!("Failed to initialize enigo keyboard: {}", e)
+        })?;
+        
+        // Send Ctrl+V key combination (Cmd+V on macOS)
+        #[cfg(target_os = "macos")]
+        let modifier_key = Key::Meta;
+        #[cfg(not(target_os = "macos"))]
+        let modifier_key = Key::Control;
+        
+        enigo.key(modifier_key, enigo::Direction::Press).map_err(|e| {
+            format!("Failed to press modifier key: {}", e)
+        })?;
+        
+        enigo.key(Key::Unicode('v'), enigo::Direction::Click).map_err(|e| {
+            format!("Failed to click V key: {}", e)
+        })?;
+        
+        enigo.key(modifier_key, enigo::Direction::Release).map_err(|e| {
+            format!("Failed to release modifier key: {}", e)
+        })?;
+        
+        DebugLogger::log_info("TEXT_INSERTION: Native - Keystroke sent successfully with enigo");
         
         // Small delay to ensure paste operation completes
         std::thread::sleep(std::time::Duration::from_millis(50));
         
+        DebugLogger::log_info("TEXT_INSERTION: Native - Text insertion completed successfully");
+        Ok(())
+    }
+
+    // PowerShell fallback method (only used if native method fails)
+    #[cfg(target_os = "windows")]
+    fn insert_text_windows_powershell_fallback(&self, text: &str) -> Result<(), String> {
+        use std::process::Command;
+        
+        // Escape text for PowerShell
+        let escaped_text = text
+            .replace("`", "``")
+            .replace("\"", "`\"")
+            .replace("'", "''")
+            .replace("\r\n", "`r`n")
+            .replace("\n", "`n")
+            .replace("\r", "`r");
+        
+        let script = format!(r#"
+            try {{
+                Set-Clipboard -Value "{}"
+                Start-Sleep -Milliseconds 100
+                Add-Type -AssemblyName System.Windows.Forms
+                [System.Windows.Forms.SendKeys]::SendWait("^v")
+                Start-Sleep -Milliseconds 50
+                exit 0
+            }} catch {{
+                Write-Error "PowerShell fallback failed: $_"
+                exit 1
+            }}
+        "#, escaped_text);
+        
+        let output = Command::new("powershell")
+            .arg("-NoProfile")
+            .arg("-WindowStyle")
+            .arg("Hidden")
+            .arg("-Command")
+            .arg(&script)
+            .output()
+            .map_err(|e| format!("PowerShell execution failed: {}", e))?;
+        
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            return Err(format!("PowerShell fallback failed: {}", stderr));
+        }
+        
+        DebugLogger::log_info("TEXT_INSERTION: Windows - PowerShell fallback completed successfully");
         Ok(())
     }
 
     #[cfg(target_os = "linux")]
     fn insert_text_linux(&self, text: &str) -> Result<(), String> {
-        DebugLogger::log_info("TEXT_INSERTION: Linux - Using clipboard-paste method");
+        DebugLogger::log_info("TEXT_INSERTION: Linux - Using native Rust clipboard + enigo keyboard simulation");
+        DebugLogger::log_info(&format!("TEXT_INSERTION: Linux - Setting clipboard content for text: '{}'", text));
         
-        // Step 1: Set clipboard content
-        DebugLogger::log_info("TEXT_INSERTION: Linux - Setting clipboard content");
-        
-        // Try xclip first (X11)
-        let xclip_result = Command::new("xclip")
-            .arg("-selection")
-            .arg("clipboard")
-            .stdin(std::process::Stdio::piped())
-            .spawn()
-            .and_then(|mut child| {
-                use std::io::Write;
-                if let Some(stdin) = child.stdin.as_mut() {
-                    stdin.write_all(text.as_bytes())?;
-                }
-                child.wait()
-            });
-            
-        if xclip_result.is_ok() {
-            DebugLogger::log_info("TEXT_INSERTION: Linux - Clipboard set with xclip");
-            
-            // Send Ctrl+V using xdotool
-            let paste_result = Command::new("xdotool")
-                .arg("key")
-                .arg("ctrl+v")
-                .output();
-                
-            if paste_result.is_ok() {
-                DebugLogger::log_info("TEXT_INSERTION: Linux - Paste sent with xdotool");
-                // Small delay to ensure paste operation completes
-                std::thread::sleep(std::time::Duration::from_millis(50));
-                return Ok(());
-            }
-        }
-        
-        // Try wl-copy (Wayland)
-        let wl_copy_result = Command::new("wl-copy")
-            .stdin(std::process::Stdio::piped())
-            .spawn()
-            .and_then(|mut child| {
-                use std::io::Write;
-                if let Some(stdin) = child.stdin.as_mut() {
-                    stdin.write_all(text.as_bytes())?;
-                }
-                child.wait()
-            });
-            
-        if wl_copy_result.is_ok() {
-            DebugLogger::log_info("TEXT_INSERTION: Linux - Clipboard set with wl-copy");
-            
-            // Try wtype for paste (Wayland)
-            let wtype_result = Command::new("wtype")
-                .arg("-M")
-                .arg("ctrl")
-                .arg("-k")
-                .arg("v")
-                .output();
-                
-            if wtype_result.is_ok() {
-                DebugLogger::log_info("TEXT_INSERTION: Linux - Paste sent with wtype");
-                // Small delay to ensure paste operation completes
-                std::thread::sleep(std::time::Duration::from_millis(50));
-                return Ok(());
-            }
-            
-            // Try ydotool for paste (alternative Wayland)
-            let ydotool_result = Command::new("ydotool")
-                .arg("key")
-                .arg("29:1")  // Ctrl down
-                .arg("47:1")  // V down
-                .arg("47:0")  // V up
-                .arg("29:0")  // Ctrl up
-                .output();
-                
-            if ydotool_result.is_ok() {
-                DebugLogger::log_info("TEXT_INSERTION: Linux - Paste sent with ydotool");
-                // Small delay to ensure paste operation completes
-                std::thread::sleep(std::time::Duration::from_millis(50));
-                return Ok(());
-            }
-        }
-        
-        DebugLogger::log_pipeline_error("text_insertion_linux", "No clipboard/paste tools available");
-        Err("No clipboard or paste tools available (tried xclip+xdotool, wl-copy+wtype, wl-copy+ydotool)".to_string())
+        // Use the shared native implementation
+        self.insert_text_native(text)
     }
 
     #[cfg(target_os = "macos")]
     fn insert_text_macos(&self, text: &str) -> Result<(), String> {
-        DebugLogger::log_info("TEXT_INSERTION: macOS - Using clipboard-paste method");
+        DebugLogger::log_info("TEXT_INSERTION: macOS - Using native Rust clipboard + enigo keyboard simulation");
+        DebugLogger::log_info(&format!("TEXT_INSERTION: macOS - Setting clipboard content for text: '{}'", text));
         
-        // Step 1: Set clipboard content using pbcopy
-        DebugLogger::log_info("TEXT_INSERTION: macOS - Setting clipboard content");
-        let clipboard_result = Command::new("pbcopy")
-            .stdin(std::process::Stdio::piped())
-            .spawn()
-            .and_then(|mut child| {
-                use std::io::Write;
-                if let Some(stdin) = child.stdin.as_mut() {
-                    stdin.write_all(text.as_bytes())?;
-                }
-                child.wait()
-            });
-            
-        clipboard_result.map_err(|e| {
-            let error_msg = format!("Clipboard set failed: {}", e);
-            DebugLogger::log_pipeline_error("text_insertion_clipboard_macos", &error_msg);
-            error_msg
-        })?;
-        
-        DebugLogger::log_info("TEXT_INSERTION: macOS - Clipboard content set successfully");
-        
-        // Step 2: Send Cmd+V keystroke using AppleScript
-        DebugLogger::log_info("TEXT_INSERTION: macOS - Sending Cmd+V keystroke");
-        let paste_script = "tell application \"System Events\" to key code 9 using {command down}";
-        
-        let paste_result = Command::new("osascript")
-            .arg("-e")
-            .arg(paste_script)
-            .output()
-            .map_err(|e| {
-                let error_msg = format!("Paste keystroke failed: {}", e);
-                DebugLogger::log_pipeline_error("text_insertion_paste_macos", &error_msg);
-                error_msg
-            })?;
-            
-        if !paste_result.status.success() {
-            let error_msg = format!("Paste keystroke failed with status: {}", paste_result.status);
-            DebugLogger::log_pipeline_error("text_insertion_paste_macos", &error_msg);
-            return Err(error_msg);
-        }
-        
-        DebugLogger::log_info("TEXT_INSERTION: macOS - Clipboard-paste insertion completed successfully");
-        
-        // Small delay to ensure paste operation completes
-        std::thread::sleep(std::time::Duration::from_millis(50));
-        
-        Ok(())
+        // Use the shared native implementation
+        self.insert_text_native(text)
+    }
+
+    // Test function for debugging text insertion
+    pub fn test_insert(&self, test_text: &str) -> Result<(), String> {
+        DebugLogger::log_info(&format!("=== TEXT_INSERTION_TEST: Testing with text='{}' ===", test_text));
+        self.insert_text(test_text)
     }
 }

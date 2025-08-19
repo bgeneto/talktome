@@ -977,6 +977,14 @@ async fn start_recording(
                             Ok(transcription) => {
                                 DebugLogger::log_info(&format!("STT complete transcription: '{}'", transcription));
                                 
+                                // IMMEDIATELY emit raw transcription to frontend (don't wait for translation)
+                                let _ = app_single.emit("transcribed-text", serde_json::json!({
+                                    "raw": transcription,
+                                    "final": "" // Empty final initially - will be updated when translation completes
+                                }));
+                                DebugLogger::log_info("EMIT: Sent raw transcription immediately to frontend");
+                                
+                                // Now do translation/correction in background and emit update when done
                                 let final_text = if let Some(ref translation_service) = translation_service_single {
                                     match translation_service.process_text(
                                         &transcription,
@@ -986,16 +994,39 @@ async fn start_recording(
                                     ).await {
                                         Ok(processed_text) => {
                                             DebugLogger::log_translation_response(true, Some(&processed_text), None, None);
+                                            
+                                            // Emit updated transcription with final processed text
+                                            let _ = app_single.emit("transcribed-text", serde_json::json!({
+                                                "raw": transcription,
+                                                "final": processed_text
+                                            }));
+                                            DebugLogger::log_info("EMIT: Sent final processed text to frontend");
+                                            
                                             processed_text
                                         },
                                         Err(e) => {
                                             DebugLogger::log_translation_response(false, None, Some(&e), None);
                                             DebugLogger::log_pipeline_error("translation", &e);
                                             let _ = app_single.emit("processing-error", format!("Translation Error - Using fallback: {}", e));
+                                            
+                                            // Even if translation fails, emit the raw transcription as final
+                                            let _ = app_single.emit("transcribed-text", serde_json::json!({
+                                                "raw": transcription,
+                                                "final": transcription // Use raw transcription as fallback
+                                            }));
+                                            DebugLogger::log_info("EMIT: Sent raw transcription as fallback final text");
+                                            
                                             transcription.clone()
                                         }
                                     }
                                 } else {
+                                    // No translation service - just send raw transcription as final
+                                    let _ = app_single.emit("transcribed-text", serde_json::json!({
+                                        "raw": transcription,
+                                        "final": transcription
+                                    }));
+                                    DebugLogger::log_info("EMIT: Sent raw transcription as final (no translation service)");
+                                    
                                     transcription.clone()
                                 };
                                 
@@ -1012,11 +1043,7 @@ async fn start_recording(
                                     DebugLogger::log_info("TEXT_INSERTION: skipped (text insertion disabled)");
                                 }
                                 
-                                // Emit complete transcription to frontend
-                                let _ = app_single.emit("transcribed-text", serde_json::json!({
-                                    "raw": transcription,
-                                    "final": final_text
-                                }));
+                                // Note: transcribed-text events already emitted above at each stage
                             },
                             Err(e) => {
                                 DebugLogger::log_pipeline_error("stt", &format!("STT processing failed: {}", e));
@@ -1433,6 +1460,14 @@ async fn frontend_log(tag: String, payload: Option<serde_json::Value>) -> Result
     Ok(())
 }
 
+// Test command for text insertion debugging
+#[tauri::command]
+async fn test_text_insertion(test_text: String) -> Result<(), String> {
+    DebugLogger::log_info(&format!("TEST_TEXT_INSERTION: called with text='{}'", test_text));
+    let text_insertion_service = TextInsertionService::new();
+    text_insertion_service.test_insert(&test_text)
+}
+
 // Translation command for frontend
 #[tauri::command]
 async fn translate_text(
@@ -1647,6 +1682,7 @@ pub fn run() {
             get_log_file_path,
             get_data_directory_info,
             frontend_log,
+            test_text_insertion,
             translate_text,
             load_settings_from_frontend,
             save_settings_from_frontend,
