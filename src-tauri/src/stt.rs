@@ -1,7 +1,7 @@
+use crate::debug_logger::DebugLogger;
 use reqwest;
 use serde_json::Value;
 use std::time::Duration;
-use crate::debug_logger::DebugLogger;
 
 pub struct STTService {
     client: reqwest::Client,
@@ -12,7 +12,12 @@ pub struct STTService {
 }
 
 impl STTService {
-    pub fn new(api_endpoint: String, api_key: String, model: String, spoken_language: String) -> Self {
+    pub fn new(
+        api_endpoint: String,
+        api_key: String,
+        model: String,
+        spoken_language: String,
+    ) -> Self {
         let client = reqwest::Client::builder()
             .timeout(Duration::from_secs(30))
             .build()
@@ -28,10 +33,19 @@ impl STTService {
     }
 
     /// Transcribe audio chunk with enhanced error handling
-    pub async fn transcribe_chunk(&self, audio_data: Vec<f32>, sample_rate: u32, label: Option<&str>) -> Result<String, String> {
+    pub async fn transcribe_chunk(
+        &self,
+        audio_data: Vec<f32>,
+        sample_rate: u32,
+        label: Option<&str>,
+    ) -> Result<String, String> {
         DebugLogger::log_info("=== STT: transcribe_chunk() called ===");
-        DebugLogger::log_info(&format!("STT: Input audio_data.len()={}, sample_rate={}", audio_data.len(), sample_rate));
-        
+        DebugLogger::log_info(&format!(
+            "STT: Input audio_data.len()={}, sample_rate={}",
+            audio_data.len(),
+            sample_rate
+        ));
+
         if audio_data.is_empty() {
             DebugLogger::log_pipeline_error("stt", "Empty audio data provided");
             return Err("Empty audio data".to_string());
@@ -39,21 +53,29 @@ impl STTService {
 
         // Check for audio quality - skip if too quiet
         let max_amplitude = audio_data.iter().map(|&x| x.abs()).fold(0.0, f32::max);
-        DebugLogger::log_info(&format!("STT: Audio quality check - max_amplitude={:.6}, threshold=0.01", max_amplitude));
+        DebugLogger::log_info(&format!(
+            "STT: Audio quality check - max_amplitude={:.6}, threshold=0.01",
+            max_amplitude
+        ));
         if max_amplitude < 0.01 {
-            DebugLogger::log_info(&format!("Audio chunk too quiet (max_amplitude: {:.6}), returning empty", max_amplitude));
+            DebugLogger::log_info(&format!(
+                "Audio chunk too quiet (max_amplitude: {:.6}), returning empty",
+                max_amplitude
+            ));
             return Ok(String::new()); // Return empty string for silent audio
         }
 
         // Convert f32 samples to i16 for WAV encoding
         DebugLogger::log_info("STT: Converting audio to WAV format");
-        let audio_bytes = self.encode_wav(&audio_data, sample_rate)
-            .map_err(|e| {
-                let error_msg = format!("Audio encoding error: {}", e);
-                DebugLogger::log_pipeline_error("stt", &error_msg);
-                error_msg
-            })?;
-    DebugLogger::log_info(&format!("STT: WAV encoding complete, output size={} bytes", audio_bytes.len()));
+        let audio_bytes = self.encode_wav(&audio_data, sample_rate).map_err(|e| {
+            let error_msg = format!("Audio encoding error: {}", e);
+            DebugLogger::log_pipeline_error("stt", &error_msg);
+            error_msg
+        })?;
+        DebugLogger::log_info(&format!(
+            "STT: WAV encoding complete, output size={} bytes",
+            audio_bytes.len()
+        ));
 
         // Skip very short audio (use duration threshold based on original sample_rate)
         let duration_secs = audio_data.len() as f32 / sample_rate as f32;
@@ -63,12 +85,15 @@ impl STTService {
             duration_secs, min_duration
         ));
         if duration_secs < min_duration {
-            DebugLogger::log_info(&format!("Audio chunk too short ({:.3}s), skipping", duration_secs));
+            DebugLogger::log_info(&format!(
+                "Audio chunk too short ({:.3}s), skipping",
+                duration_secs
+            ));
             return Ok(String::new());
         }
 
         DebugLogger::log_transcription_request(audio_bytes.len(), &self.api_endpoint);
-        
+
         // Save exact WAV payload to logs for debugging (only for requests we actually send)
         let dump_label = label.unwrap_or("stt_request");
         if let Some(path) = DebugLogger::save_wav_dump(dump_label, &audio_bytes) {
@@ -84,11 +109,14 @@ impl STTService {
         // Send request to Whisper API with retries
         let url = format!("{}/audio/transcriptions", self.api_endpoint);
         DebugLogger::log_info(&format!("STT: Preparing request to URL: {}", url));
-        DebugLogger::log_info(&format!("STT: Audio payload size: {} bytes", audio_bytes.len()));
-        
+        DebugLogger::log_info(&format!(
+            "STT: Audio payload size: {} bytes",
+            audio_bytes.len()
+        ));
+
         for attempt in 1..=3 {
             DebugLogger::log_info(&format!("STT attempt {}/3 to {}", attempt, url));
-            
+
             // Create multipart form data fresh for each attempt
             DebugLogger::log_info("STT: Creating multipart form data");
             let mut form = reqwest::multipart::Form::new()
@@ -104,19 +132,22 @@ impl STTService {
                 DebugLogger::log_info("STT: No language hint provided (auto-detect)");
             }
 
-            form = form
-                .part("file", reqwest::multipart::Part::bytes(audio_bytes.clone())
+            form = form.part(
+                "file",
+                reqwest::multipart::Part::bytes(audio_bytes.clone())
                     .file_name("audio.wav")
                     .mime_str("audio/wav")
                     .map_err(|e| {
                         let error_msg = format!("Multipart error: {}", e);
                         DebugLogger::log_pipeline_error("stt", &error_msg);
                         error_msg
-                    })?);
+                    })?,
+            );
             DebugLogger::log_info("STT: Multipart form created successfully");
 
             DebugLogger::log_info("STT: Sending HTTP POST request");
-            let response = self.client
+            let response = self
+                .client
                 .post(&url)
                 .header("Authorization", format!("Bearer {}", self.api_key))
                 .multipart(form)
@@ -127,71 +158,83 @@ impl STTService {
                 Ok(resp) => {
                     let status = resp.status();
                     DebugLogger::log_info(&format!("STT API response status: {}", status));
-                    DebugLogger::log_info(&format!("STT API response headers: {:?}", resp.headers()));
-                    
+                    DebugLogger::log_info(&format!(
+                        "STT API response headers: {:?}",
+                        resp.headers()
+                    ));
+
                     if resp.status().is_success() {
                         DebugLogger::log_info("STT: Response is successful, reading response text");
-                        let response_text = resp.text().await
-                            .map_err(|e| {
-                                let error_msg = format!("Failed to read response text: {}", e);
-                                DebugLogger::log_pipeline_error("stt", &error_msg);
-                                error_msg
-                            })?;
-                        
+                        let response_text = resp.text().await.map_err(|e| {
+                            let error_msg = format!("Failed to read response text: {}", e);
+                            DebugLogger::log_pipeline_error("stt", &error_msg);
+                            error_msg
+                        })?;
+
                         DebugLogger::log_info(&format!("STT API raw response: {}", response_text));
-                        
+
                         DebugLogger::log_info("STT: Parsing JSON response");
-                        let json: Value = serde_json::from_str(&response_text)
-                            .map_err(|e| {
-                                let error_msg = format!("JSON parsing error: {}", e);
-                                DebugLogger::log_pipeline_error("stt", &error_msg);
-                                error_msg
-                            })?;
-                        
-                        DebugLogger::log_info(&format!("STT: Parsed JSON: {}", serde_json::to_string_pretty(&json).unwrap_or_default()));
-                        
+                        let json: Value = serde_json::from_str(&response_text).map_err(|e| {
+                            let error_msg = format!("JSON parsing error: {}", e);
+                            DebugLogger::log_pipeline_error("stt", &error_msg);
+                            error_msg
+                        })?;
+
+                        DebugLogger::log_info(&format!(
+                            "STT: Parsed JSON: {}",
+                            serde_json::to_string_pretty(&json).unwrap_or_default()
+                        ));
+
                         if let Some(text) = json["text"].as_str() {
                             DebugLogger::log_info(&format!("STT extracted text: '{}'", text));
                             return Ok(text.trim().to_string());
                         } else {
                             let error_msg = "No text in API response".to_string();
                             DebugLogger::log_pipeline_error("stt", &error_msg);
-                            DebugLogger::log_info(&format!("STT: Available JSON keys: {:?}", json.as_object().map(|o| o.keys().collect::<Vec<_>>())));
+                            DebugLogger::log_info(&format!(
+                                "STT: Available JSON keys: {:?}",
+                                json.as_object().map(|o| o.keys().collect::<Vec<_>>())
+                            ));
                             return Err(error_msg);
                         }
                     } else {
-                        DebugLogger::log_info("STT: Response status is not successful, reading error response");
+                        DebugLogger::log_info(
+                            "STT: Response status is not successful, reading error response",
+                        );
                         let error_text = resp.text().await.unwrap_or_default();
                         DebugLogger::log_info(&format!("STT API error response: {}", error_text));
-                        
+
                         // Don't retry on authentication errors
                         if status.as_u16() == 401 || status.as_u16() == 403 {
                             let error_msg = format!("Authentication error: {}", error_text);
                             DebugLogger::log_pipeline_error("stt", &error_msg);
                             return Err(error_msg);
                         }
-                        
+
                         if attempt == 3 {
-                            let error_msg = format!("API error after {} attempts: {} - {}", attempt, status, error_text);
+                            let error_msg = format!(
+                                "API error after {} attempts: {} - {}",
+                                attempt, status, error_text
+                            );
                             DebugLogger::log_pipeline_error("stt", &error_msg);
                             return Err(error_msg);
                         }
-                        
+
                         // Wait before retry
                         let delay = Duration::from_millis(1000 * attempt);
                         DebugLogger::log_info(&format!("Retrying in {}ms...", delay.as_millis()));
                         tokio::time::sleep(delay).await;
                     }
-                },
+                }
                 Err(e) => {
                     DebugLogger::log_info(&format!("STT network error: {}", e));
-                    
+
                     if attempt == 3 {
                         let error_msg = format!("Network error after {} attempts: {}", attempt, e);
                         DebugLogger::log_pipeline_error("stt", &error_msg);
                         return Err(error_msg);
                     }
-                    
+
                     // Wait before retry
                     let delay = Duration::from_millis(1000 * attempt);
                     DebugLogger::log_info(&format!("Retrying in {}ms...", delay.as_millis()));
@@ -199,7 +242,7 @@ impl STTService {
                 }
             }
         }
-        
+
         let error_msg = "Max retries exceeded".to_string();
         DebugLogger::log_pipeline_error("stt", &error_msg);
         Err(error_msg)
@@ -211,7 +254,9 @@ impl STTService {
         let (resampled, out_rate) = if sample_rate == target_rate {
             (samples.to_vec(), sample_rate)
         } else {
-            if samples.is_empty() { return Err("No samples to encode".into()); }
+            if samples.is_empty() {
+                return Err("No samples to encode".into());
+            }
             let ratio = target_rate as f32 / sample_rate as f32;
             let out_len = ((samples.len() as f32) * ratio).max(1.0).round() as usize;
             let mut out = Vec::with_capacity(out_len);

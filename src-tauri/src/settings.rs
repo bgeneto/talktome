@@ -1,9 +1,9 @@
 use serde::{Deserialize, Serialize};
 // std::fs was used by legacy file-based API key handling which has been removed
+use keyring::Entry;
+use serde_json::json;
 use std::path::PathBuf;
 use tauri::{AppHandle, Manager};
-use serde_json::json;
-use keyring::Entry;
 
 #[derive(Serialize, Deserialize, Clone)]
 pub struct AppSettings {
@@ -68,12 +68,12 @@ impl AppSettings {
         let service = "talktome_api_key";
         let username = whoami::username();
         let entry = Entry::new(service, &username);
-        
+
         match entry.get_password() {
             Ok(pw) => {
                 println!("API_KEY: Successfully retrieved from keyring");
                 return Ok(pw);
-            },
+            }
             Err(e) => {
                 println!("API_KEY: Failed to get from keyring: {}", e);
                 return Err("API key not found in secure storage".to_string());
@@ -88,17 +88,17 @@ impl AppSettings {
         if trimmed_key.is_empty() {
             return Err("API key cannot be empty".to_string());
         }
-        
+
         // Store in OS keyring
         let service = "talktome_api_key";
         let username = whoami::username();
         let entry = Entry::new(service, &username);
-        
+
         match entry.set_password(trimmed_key) {
             Ok(_) => {
                 println!("API_KEY: Successfully stored in keyring");
                 Ok(())
-            },
+            }
             Err(e) => {
                 println!("API_KEY: Failed to store in keyring: {}", e);
                 // Do NOT fallback to file-based storage for security reasons
@@ -119,7 +119,7 @@ impl AppSettings {
         if let Ok(exe_path) = std::env::current_exe() {
             if let Some(exe_dir) = exe_path.parent() {
                 let portable_dir = exe_dir.join("data");
-                
+
                 // Check if we can write to the exe directory (portable mode)
                 if let Ok(_) = std::fs::create_dir_all(&portable_dir) {
                     if portable_dir.exists() {
@@ -128,9 +128,12 @@ impl AppSettings {
                 }
             }
         }
-        
+
         // Fallback to app data directory
-        let app_dir = app_handle.path().app_data_dir().map_err(|e| e.to_string())?;
+        let app_dir = app_handle
+            .path()
+            .app_data_dir()
+            .map_err(|e| e.to_string())?;
         Ok(app_dir)
     }
 
@@ -145,7 +148,11 @@ impl AppSettings {
         match entry.get_password() {
             Ok(pw) => {
                 let len = pw.len();
-                let preview = if len <= 10 { "*".repeat(len) } else { format!("{}{}{}", &pw[..4], "*".repeat(8), &pw[len-4..]) };
+                let preview = if len <= 10 {
+                    "*".repeat(len)
+                } else {
+                    format!("{}{}{}", &pw[..4], "*".repeat(8), &pw[len - 4..])
+                };
                 Ok(json!({
                     "service": service,
                     "username": username,

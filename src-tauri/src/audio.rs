@@ -1,11 +1,71 @@
 // Simplified audio recording for TalkToMe with noise reduction
 // This module handles basic audio recording - start/stop only, with nnnoiseless filtering
+use crate::debug_logger::DebugLogger;
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::{FromSample, Sample};
-use std::sync::{Arc, Mutex};
-use std::sync::mpsc;
-use crate::debug_logger::DebugLogger;
 use nnnoiseless::DenoiseState;
+use std::sync::mpsc;
+use std::sync::{Arc, Mutex};
+
+/// Simple WAV file encoder for debugging purposes
+fn encode_wav_bytes(samples: &[f32], sample_rate: u32) -> Vec<u8> {
+    let num_samples = samples.len() as u32;
+    let num_channels = 1u16; // Mono
+    let bits_per_sample = 16u16;
+    let byte_rate = sample_rate * num_channels as u32 * bits_per_sample as u32 / 8;
+    let block_align = num_channels * bits_per_sample / 8;
+    let data_size = num_samples * bits_per_sample as u32 / 8;
+    let file_size = 36 + data_size;
+
+    let mut wav_data = Vec::new();
+
+    // RIFF header
+    wav_data.extend_from_slice(b"RIFF");
+    wav_data.extend_from_slice(&file_size.to_le_bytes());
+    wav_data.extend_from_slice(b"WAVE");
+
+    // fmt chunk
+    wav_data.extend_from_slice(b"fmt ");
+    wav_data.extend_from_slice(&16u32.to_le_bytes()); // fmt chunk size
+    wav_data.extend_from_slice(&1u16.to_le_bytes()); // audio format (PCM)
+    wav_data.extend_from_slice(&num_channels.to_le_bytes());
+    wav_data.extend_from_slice(&sample_rate.to_le_bytes());
+    wav_data.extend_from_slice(&byte_rate.to_le_bytes());
+    wav_data.extend_from_slice(&block_align.to_le_bytes());
+    wav_data.extend_from_slice(&bits_per_sample.to_le_bytes());
+
+    // data chunk
+    wav_data.extend_from_slice(b"data");
+    wav_data.extend_from_slice(&data_size.to_le_bytes());
+
+    // Convert f32 samples to i16 and append
+    for &sample in samples {
+        let sample_i16 = (sample.clamp(-1.0, 1.0) * 32767.0) as i16;
+        wav_data.extend_from_slice(&sample_i16.to_le_bytes());
+    }
+
+    wav_data
+}
+
+/// Simple downsampling function using decimation
+fn downsample_audio(input: &[f32], input_rate: u32, target_rate: u32) -> Vec<f32> {
+    if input_rate == target_rate {
+        return input.to_vec();
+    }
+    
+    let ratio = input_rate as f32 / target_rate as f32;
+    let output_len = (input.len() as f32 / ratio) as usize;
+    let mut output = Vec::with_capacity(output_len);
+    
+    for i in 0..output_len {
+        let src_index = (i as f32 * ratio) as usize;
+        if src_index < input.len() {
+            output.push(input[src_index]);
+        }
+    }
+    
+    output
+}
 
 /// Noise reduction processor using nnnoiseless
 pub struct NoiseReducer {
@@ -24,46 +84,110 @@ impl NoiseReducer {
     }
 
     /// Process audio samples through nnnoiseless to reduce background noise
-    /// nnnoiseless works best with 16kHz audio and 480 sample frames (30ms)
+    /// Downsamples to 16kHz for optimal noise reduction and keeps it at 16kHz for efficiency
     pub fn process_audio(&mut self, input: &[f32]) -> Vec<f32> {
-        const DENOISE_FRAME_SIZE: usize = 480; // 30ms at 16kHz
+        use crate::debug_logger::DebugLogger;
 
-        // Add new samples to the frame buffer
-        self.frame_buffer.extend_from_slice(input);
-        
+        const TARGET_SAMPLE_RATE: u32 = 16000;
+        const NNNOISE_FRAME_SIZE: usize = 480; // 30ms at 16kHz
+
+        DebugLogger::log_info(&format!(
+            "NOISE_REDUCER: Processing {} input samples at {}Hz, downsampling to {}Hz",
+            input.len(),
+            self.sample_rate,
+            TARGET_SAMPLE_RATE
+        ));
+
+        // First, downsample the input to 16kHz if needed
+        let downsampled_input = if self.sample_rate != TARGET_SAMPLE_RATE {
+            let target_length =
+                (input.len() as f32 * TARGET_SAMPLE_RATE as f32 / self.sample_rate as f32) as usize;
+            let mut downsampled = Vec::with_capacity(target_length);
+
+            // Simple decimation - take every nth sample
+            let step = self.sample_rate as f32 / TARGET_SAMPLE_RATE as f32;
+            for i in 0..target_length {
+                let src_index = (i as f32 * step) as usize;
+                if src_index < input.len() {
+                    downsampled.push(input[src_index]);
+                } else {
+                    downsampled.push(0.0);
+                }
+            }
+
+            DebugLogger::log_info(&format!(
+                "NOISE_REDUCER: Downsampled from {} samples at {}Hz to {} samples at {}Hz",
+                input.len(),
+                self.sample_rate,
+                downsampled.len(),
+                TARGET_SAMPLE_RATE
+            ));
+            downsampled
+        } else {
+            input.to_vec()
+        };
+
+        // Add downsampled samples to the frame buffer
+        self.frame_buffer.extend_from_slice(&downsampled_input);
+
         let mut output = Vec::new();
-        
-        // Process complete frames
-        while self.frame_buffer.len() >= DENOISE_FRAME_SIZE {
+        let mut frames_processed = 0;
+
+        // Process complete frames at 16kHz
+        while self.frame_buffer.len() >= NNNOISE_FRAME_SIZE {
             // Take one frame from the buffer
-            let frame: Vec<f32> = self.frame_buffer.drain(0..DENOISE_FRAME_SIZE).collect();
-            
-            // Apply noise reduction
-            let mut out_frame = vec![0.0f32; DENOISE_FRAME_SIZE];
-            self.denoise_state.process_frame(&mut out_frame[..], &frame[..]);
+            let frame: Vec<f32> = self.frame_buffer.drain(0..NNNOISE_FRAME_SIZE).collect();
+
+            // Calculate input frame statistics
+            let _input_max = frame.iter().map(|x| x.abs()).fold(0.0f32, f32::max);
+            let _input_rms = (frame.iter().map(|x| x * x).sum::<f32>() / frame.len() as f32).sqrt();
+
+            // Apply noise reduction directly on 16kHz audio
+            let mut out_frame = vec![0.0f32; NNNOISE_FRAME_SIZE];
+            self.denoise_state
+                .process_frame(&mut out_frame[..], &frame[..]);
+
+            // Calculate output frame statistics
+            let _output_max = out_frame.iter().map(|x| x.abs()).fold(0.0f32, f32::max);
+            let _output_rms =
+                (out_frame.iter().map(|x| x * x).sum::<f32>() / out_frame.len() as f32).sqrt();
+
             output.extend_from_slice(&out_frame);
+            frames_processed += 1;
         }
-        
+
+        DebugLogger::log_info(&format!(
+            "NOISE_REDUCER: Processed {} frames at 16kHz, {} samples remaining in buffer, returning {} samples at 16kHz",
+            frames_processed,
+            self.frame_buffer.len(),
+            output.len()
+        ));
+
         output
     }
 
     /// Get any remaining samples in the buffer (useful for final processing)
+    /// Get any remaining samples in the buffer (useful for final processing)
+    /// Returns samples at 16kHz
     pub fn flush(&mut self) -> Vec<f32> {
         if self.frame_buffer.is_empty() {
             return Vec::new();
         }
 
+        const NNNOISE_FRAME_SIZE: usize = 480; // 30ms at 16kHz
+
         // Pad the remaining buffer to complete frame size with zeros
-        const DENOISE_FRAME_SIZE: usize = 480;
-        while self.frame_buffer.len() < DENOISE_FRAME_SIZE {
+        while self.frame_buffer.len() < NNNOISE_FRAME_SIZE {
             self.frame_buffer.push(0.0);
         }
 
         let frame = self.frame_buffer.clone();
         self.frame_buffer.clear();
-        
-        let mut out_frame = vec![0.0f32; DENOISE_FRAME_SIZE];
-        self.denoise_state.process_frame(&mut out_frame[..], &frame[..]);
+
+        // Process the final frame at 16kHz
+        let mut out_frame = vec![0.0f32; NNNOISE_FRAME_SIZE];
+        self.denoise_state
+            .process_frame(&mut out_frame[..], &frame[..]);
         out_frame
     }
 }
@@ -85,10 +209,7 @@ pub struct AudioChunk {
 
 impl AudioChunk {
     pub fn new(data: Vec<f32>, sample_rate: u32) -> Self {
-        Self {
-            data,
-            sample_rate,
-        }
+        Self { data, sample_rate }
     }
 
     pub fn is_empty(&self) -> bool {
@@ -114,9 +235,12 @@ impl AudioCapture {
     }
 
     /// Start recording audio from the default microphone
-    pub fn start_capture(&mut self, _audio_chunking_enabled: bool) -> Result<mpsc::Receiver<AudioChunk>, Box<dyn std::error::Error + Send + Sync>> {
+    pub fn start_capture(
+        &mut self,
+        _audio_chunking_enabled: bool,
+    ) -> Result<mpsc::Receiver<AudioChunk>, Box<dyn std::error::Error + Send + Sync>> {
         DebugLogger::log_info("AudioCapture::start_capture() called");
-        
+
         // Check if already recording
         {
             let recording = self.is_recording.lock().unwrap();
@@ -124,18 +248,27 @@ impl AudioCapture {
                 return Err("Already recording".into());
             }
         }
-        
+
         let host = cpal::default_host();
         DebugLogger::log_info(&format!("Audio host: {:?}", host.id()));
-        
-        let device = host.default_input_device().ok_or("No input device available")?;
-        DebugLogger::log_info(&format!("Input device: {:?}", device.name().unwrap_or_default()));
-        
+
+        let device = host
+            .default_input_device()
+            .ok_or("No input device available")?;
+        DebugLogger::log_info(&format!(
+            "Input device: {:?}",
+            device.name().unwrap_or_default()
+        ));
+
         let config = device.default_input_config()?;
         let sample_rate = config.sample_rate().0;
-        DebugLogger::log_info(&format!("Audio config: sample_rate={}Hz, channels={}, format={:?}", 
-            sample_rate, config.channels(), config.sample_format()));
-        
+        DebugLogger::log_info(&format!(
+            "Audio config: sample_rate={}Hz, channels={}, format={:?}",
+            sample_rate,
+            config.channels(),
+            config.sample_format()
+        ));
+
         // Store sample rate
         {
             let mut sr = self.sample_rate.lock().unwrap();
@@ -146,52 +279,63 @@ impl AudioCapture {
         {
             let mut noise_reducer = self.noise_reducer.lock().unwrap();
             *noise_reducer = Some(NoiseReducer::new(sample_rate));
-            DebugLogger::log_info(&format!("Noise reducer initialized for {}Hz", sample_rate));
+            DebugLogger::log_info(&format!(
+                "Noise reducer initialized for {}Hz (nnnoiseless works best at 16kHz)",
+                sample_rate
+            ));
+
+            // Warn if sample rate is not optimal for nnnoiseless
+            if sample_rate != 16000 {
+                DebugLogger::log_info(&format!(
+                    "WARNING: Sample rate is {}Hz, but nnnoiseless is optimized for 16kHz. Noise reduction may be less effective.",
+                    sample_rate
+                ));
+            }
         }
-        
+
         // Clear audio buffer
         {
             let mut buffer = self.audio_buffer.lock().unwrap();
             buffer.clear();
         }
-        
+
         // Create a channel for sending the final audio chunk when recording stops
         let (tx, rx) = mpsc::channel();
-        
+
         // Set recording state to true
         {
             let mut recording = self.is_recording.lock().unwrap();
             *recording = true;
         }
         DebugLogger::log_info("Audio recording state set to true");
-        
+
         // Build the audio stream
         let stream = match config.sample_format() {
             cpal::SampleFormat::F32 => {
                 DebugLogger::log_info("Building F32 input stream");
                 self.build_input_stream::<f32>(&device, &config.into(), sample_rate)?
-            },
+            }
             cpal::SampleFormat::I16 => {
                 DebugLogger::log_info("Building I16 input stream");
                 self.build_input_stream::<i16>(&device, &config.into(), sample_rate)?
-            },
+            }
             cpal::SampleFormat::U16 => {
                 DebugLogger::log_info("Building U16 input stream");
                 self.build_input_stream::<u16>(&device, &config.into(), sample_rate)?
-            },
+            }
             _ => return Err("Unsupported sample format".into()),
         };
-        
+
         DebugLogger::log_info("Starting audio stream");
         stream.play()?;
         self.stream = Some(stream);
-        
+
         // Spawn a thread to monitor for stop and send the final audio chunk
         let audio_buffer = self.audio_buffer.clone();
         let is_recording = self.is_recording.clone();
         let sample_rate_arc = self.sample_rate.clone();
         let noise_reducer_arc = self.noise_reducer.clone();
-        
+
         std::thread::spawn(move || {
             // Wait for recording to stop
             loop {
@@ -201,74 +345,137 @@ impl AudioCapture {
                     break;
                 }
             }
-            
+
             // Get the final audio data
             let final_audio = {
                 let buffer = audio_buffer.lock().unwrap();
                 buffer.clone()
             };
-            
+
             let sr = {
                 let sample_rate = sample_rate_arc.lock().unwrap();
                 *sample_rate
             };
-            
+
             if !final_audio.is_empty() {
-                DebugLogger::log_info(&format!("Processing {} samples through noise reduction", final_audio.len()));
-                
-                // Apply noise reduction to the final audio
+                DebugLogger::log_info(&format!(
+                    "Processing {} samples through noise reduction",
+                    final_audio.len()
+                ));
+
+                // Save original audio to WAV if debug is enabled
+                if DebugLogger::is_debug_enabled() {
+                    let original_wav = encode_wav_bytes(&final_audio, sr);
+                    let timestamp = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_secs();
+                    DebugLogger::save_wav_dump(&format!("original_{}", timestamp), &original_wav);
+                    DebugLogger::log_info(&format!(
+                        "Saved original audio recording: {} samples",
+                        final_audio.len()
+                    ));
+                }
+
+                // Apply noise reduction to the final audio with downsampling
                 let processed_audio = {
                     let mut noise_reducer_guard = noise_reducer_arc.lock().unwrap();
                     if let Some(ref mut noise_reducer) = noise_reducer_guard.as_mut() {
+                        DebugLogger::log_info("NOISE_REDUCTION: Applying noise reduction filter");
                         let mut processed = noise_reducer.process_audio(&final_audio);
                         // Flush any remaining samples
                         let remaining = noise_reducer.flush();
                         processed.extend_from_slice(&remaining);
                         processed
                     } else {
-                        final_audio // Fallback if noise reducer isn't available
+                        // If no noise reducer, just downsample
+                        DebugLogger::log_info("NOISE_REDUCTION: No noise reducer available, downsampling only");
+                        downsample_audio(&final_audio, sr, 16000)
                     }
                 };
-                
-                DebugLogger::log_info(&format!("Sending noise-reduced audio chunk: {} samples, {}Hz", processed_audio.len(), sr));
-                let chunk = AudioChunk::new(processed_audio, sr);
-                let _ = tx.send(chunk);
+
+                // Log comparison for debugging
+                let original_samples = final_audio.len();
+                let processed_samples = processed_audio.len();
+                let original_max = final_audio.iter().map(|x| x.abs()).fold(0.0f32, f32::max);
+                let processed_max = processed_audio.iter().map(|x| x.abs()).fold(0.0f32, f32::max);
+
+                DebugLogger::log_info(&format!(
+                    "NOISE_REDUCTION: Original {} samples (max amplitude: {:.6}), Processed {} samples (max amplitude: {:.6})",
+                    original_samples, original_max, processed_samples, processed_max
+                ));
+
+                // Check if they're actually different
+                let are_identical = original_samples == processed_samples
+                    && final_audio
+                        .iter()
+                        .zip(processed_audio.iter())
+                        .all(|(a, b)| (a - b).abs() < 1e-10);
+
+                DebugLogger::log_info(&format!(
+                    "NOISE_REDUCTION: Arrays are identical: {}",
+                    are_identical
+                ));
+
+                // Save noise-reduced audio to WAV if debug is enabled
+                if DebugLogger::is_debug_enabled() {
+                    let processed_wav = encode_wav_bytes(&processed_audio, 16000); // Always 16kHz output
+                    let timestamp = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_secs();
+                    DebugLogger::save_wav_dump(&format!("noiseless_{}", timestamp), &processed_wav);
+                    DebugLogger::log_info(&format!(
+                        "Saved noise-reduced audio recording: {} samples at 16kHz",
+                        processed_audio.len()
+                    ));
+                }
+
+                DebugLogger::log_info(&format!(
+                    "Sending noise-reduced audio chunk: {} samples, 16000Hz (downsampled from {}Hz)",
+                    processed_audio.len(),
+                    sr
+                ));
+                let chunk = AudioChunk::new(processed_audio, 16000); // Output is always 16kHz after noise reduction
+                let send_result = tx.send(chunk);
+                if send_result.is_ok() {
+                    DebugLogger::log_info("AUDIO_CHUNK_SENT: Successfully sent processed audio chunk to main pipeline");
+                } else {
+                    DebugLogger::log_info("AUDIO_CHUNK_SEND_FAILED: Main pipeline receiver may have been dropped");
+                }
             } else {
                 DebugLogger::log_info("No audio data recorded");
             }
         });
-        
+
         DebugLogger::log_info("Audio capture started successfully");
         Ok(rx)
     }
-    
+
     /// Stop recording and clean up
     pub fn stop_recording(&mut self) -> Result<(), Box<dyn std::error::Error>> {
         DebugLogger::log_info("AudioCapture::stop_recording() called");
-        
+
         // Set recording flag to false
         {
             let mut recording = self.is_recording.lock().unwrap();
             *recording = false;
         }
         DebugLogger::log_info("Recording state set to false");
-        
+
         // Stop and drop the stream
         if let Some(stream) = self.stream.take() {
             drop(stream);
             DebugLogger::log_info("Audio stream stopped and dropped");
         }
 
-        // Clean up noise reducer
-        {
-            let mut noise_reducer = self.noise_reducer.lock().unwrap();
-            *noise_reducer = None;
-            DebugLogger::log_info("Noise reducer cleaned up");
-        }
-        
+        // Note: We don't clean up the noise reducer here because the background thread
+        // might still be processing the final audio chunk. The noise reducer will be
+        // replaced when start_capture() is called again.
+
         Ok(())
     }
-    
+
     fn build_input_stream<T>(
         &self,
         device: &cpal::Device,
@@ -280,12 +487,14 @@ impl AudioCapture {
         f32: FromSample<T>,
     {
         let channels = config.channels as usize;
-        DebugLogger::log_info(&format!("Audio stream config: channels={}, sample_rate={}Hz", 
-            channels, sample_rate));
-        
+        DebugLogger::log_info(&format!(
+            "Audio stream config: channels={}, sample_rate={}Hz",
+            channels, sample_rate
+        ));
+
         let is_recording = self.is_recording.clone();
         let audio_buffer = self.audio_buffer.clone();
-        
+
         let stream = device.build_input_stream(
             config,
             move |data: &[T], _: &cpal::InputCallbackInfo| {
@@ -295,10 +504,11 @@ impl AudioCapture {
                 }
 
                 // Convert samples to f32 and take only first channel (mono)
-                let samples: Vec<f32> = data.chunks(channels)
+                let samples: Vec<f32> = data
+                    .chunks(channels)
                     .map(|chunk| chunk[0].to_sample())
                     .collect();
-                
+
                 // Append to buffer
                 {
                     let mut buffer = audio_buffer.lock().unwrap();
@@ -311,7 +521,7 @@ impl AudioCapture {
             },
             None,
         )?;
-        
+
         Ok(stream)
     }
 }

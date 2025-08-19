@@ -139,48 +139,44 @@
       unlistenSpokenLanguage = await listen(
         "tray-spoken-language-change",
         (event) => {
-        const language = event.payload as string;
-        settings.setSpokenLanguage(language);
-        selectedSourceLang = language;
+          const language = event.payload as string;
+          settings.setSpokenLanguage(language);
+          selectedSourceLang = language;
         }
       );
 
       unlistenTranslationLanguage = await listen(
         "tray-translation-language-change",
         (event) => {
-        const language = event.payload as string;
-        settings.setTranslationLanguage(language);
-        selectedTargetLang = language;
+          const language = event.payload as string;
+          settings.setTranslationLanguage(language);
+          selectedTargetLang = language;
         }
       );
 
-      unlistenAudioDevice = await listen(
-        "tray-audio-input-change",
-        (event) => {
+      unlistenAudioDevice = await listen("tray-audio-input-change", (event) => {
         const device = event.payload as string;
         settings.setAudioDevice(device);
-        }
-      );
+      });
 
-  // Register initial hotkeys and listeners asynchronously
-  const currentSettings = get(settings);
-    
+      // Register initial hotkeys and listeners asynchronously
+      const currentSettings = get(settings);
 
-  // Debounce guard to prevent rapid toggles from key repeat or programmatic loops
-    let lastToggle = 0;
-    function guard(ms = 400) {
-      const now = Date.now();
-      if (now - lastToggle < ms) return false;
-      lastToggle = now;
-      return true;
-    }
+      // Debounce guard to prevent rapid toggles from key repeat or programmatic loops
+      let lastToggle = 0;
+      function guard(ms = 400) {
+        const now = Date.now();
+        if (now - lastToggle < ms) return false;
+        lastToggle = now;
+        return true;
+      }
 
-  // Declare unlisten placeholders for hotkeys
-  let unlistenStartHK = () => {};
-  let unlistenStopHK = () => {};
-  let unlistenToggleHK = () => {};
+      // Declare unlisten placeholders for hotkeys
+      let unlistenStartHK = () => {};
+      let unlistenStopHK = () => {};
+      let unlistenToggleHK = () => {};
 
-    // Explicit hotkey events from backend
+      // Explicit hotkey events from backend
       try {
         await invoke("register_hotkeys", {
           hotkeys: {
@@ -204,73 +200,74 @@
       });
       unlistenToggleHK = await listen("toggle-recording-from-hotkey", () => {
         if (!guard()) return;
-        if (isRecording) stopRecording(); else startRecording();
+        if (isRecording) stopRecording();
+        else startRecording();
       });
 
-    // Listen for finalized utterances from Rust backend
-    unlistenTranscriptionUpdate = await listen(
-      "transcribed-text",
-      (event) => {
-        const payload: any = event.payload;
-        // Payload can be either a plain string (legacy / simple final text)
-        // or an object { raw, final } where raw is original aggregated utterance
-        // and final is processed/translated text when translation is enabled.
-        if (typeof payload === "string") {
-          const finalText: string = payload;
-          // For string payload, treat as original transcribed text only
-          pushChunkDedup(originalChunks, finalText);
-          
-          // Handle client-side translation if needed
-          const translationEnabledUI = selectedTargetLang && selectedTargetLang !== "none" && selectedTargetLang !== selectedSourceLang;
-          if (translationEnabledUI) {
-            translateText(finalText, { append: true });
-          }
-          syncDisplays();
-        } else if (payload) {
-          // Handle structured payload with separate raw and final text
-          const raw: string = payload.raw ?? "";
-          const final: string = payload.final ?? "";
-          
-          // Always add raw text to original chunks (this is the actual transcription)
-          if (raw) {
-            pushChunkDedup(originalChunks, raw);
-          }
-          
-          // Check if translation was enabled and we have different final text
-          const translationEnabledUI = selectedTargetLang && selectedTargetLang !== "none" && selectedTargetLang !== selectedSourceLang;
-          
-          if (translationEnabledUI && final && final !== raw) {
-            // Backend provided translated text, use it
-            pushChunkDedup(translatedChunks, final);
-          } else if (translationEnabledUI && raw) {
-            // Translation was enabled but backend didn't translate or returned same text
-            // Only try client-side translation if final is empty or same as raw
-            if (!final || final === raw) {
-              translateText(raw, { append: true });
+      // Listen for finalized utterances from Rust backend
+      unlistenTranscriptionUpdate = await listen(
+        "transcribed-text",
+        (event) => {
+          const payload: any = event.payload;
+          // Payload can be either a plain string (legacy / simple final text)
+          // or an object { raw, final } where raw is original aggregated utterance
+          // and final is processed/translated text when translation is enabled.
+          if (typeof payload === "string") {
+            const finalText: string = payload;
+            // For string payload, treat as original transcribed text only
+            pushChunkDedup(originalChunks, finalText);
+
+            // Handle client-side translation if needed
+            const translationEnabledUI =
+              selectedTargetLang &&
+              selectedTargetLang !== "none" &&
+              selectedTargetLang !== selectedSourceLang;
+            if (translationEnabledUI) {
+              translateText(finalText, { append: true });
             }
+            syncDisplays();
+          } else if (payload) {
+            // Handle structured payload with separate raw and final text
+            const raw: string = payload.raw ?? "";
+            const final: string = payload.final ?? "";
+
+            // Always add raw text to original chunks (this is the actual transcription)
+            if (raw) {
+              pushChunkDedup(originalChunks, raw);
+            }
+
+            // Check if translation was enabled and we have different final text
+            const translationEnabledUI =
+              selectedTargetLang &&
+              selectedTargetLang !== "none" &&
+              selectedTargetLang !== selectedSourceLang;
+
+            if (translationEnabledUI && final && final !== raw) {
+              // Backend provided translated text, use it
+              pushChunkDedup(translatedChunks, final);
+            } else if (translationEnabledUI && raw) {
+              // Translation was enabled but backend didn't translate or returned same text
+              // Only try client-side translation if final is empty or same as raw
+              if (!final || final === raw) {
+                translateText(raw, { append: true });
+              }
+            }
+            // Note: If translation is disabled, we don't put anything in translatedChunks
+
+            syncDisplays();
           }
-          // Note: If translation is disabled, we don't put anything in translatedChunks
-          
-          syncDisplays();
         }
-      }
-    );
+      );
 
-    // Listen for recording started event from tray
-    unlistenTrayStartRecording = await listen(
-      "tray-start-recording",
-      () => {
+      // Listen for recording started event from tray
+      unlistenTrayStartRecording = await listen("tray-start-recording", () => {
         startRecording();
-      }
-    );
+      });
 
-    // Listen for recording stopped event from tray
-      unlistenTrayStopRecording = await listen(
-      "tray-stop-recording",
-      () => {
+      // Listen for recording stopped event from tray
+      unlistenTrayStopRecording = await listen("tray-stop-recording", () => {
         stopRecording();
-      }
-    );
+      });
 
       // Listen to backend recording-stopped to mark session ended
       unlistenRecordingStopped = await listen("recording-stopped", () => {
@@ -308,7 +305,10 @@
       const currentSettings = get(settings);
 
       try {
-        await invoke("frontend_log", { tag: "start_recording_attempt", payload: { ts: Date.now() } });
+        await invoke("frontend_log", {
+          tag: "start_recording_attempt",
+          payload: { ts: Date.now() },
+        });
       } catch (e) {
         console.warn("frontend_log failed:", e);
       }
@@ -323,14 +323,15 @@
         textInsertionEnabled: currentSettings.textInsertionEnabled,
         audioChunkingEnabled: currentSettings.audioChunkingEnabled,
         maxRecordingTimeMinutes: currentSettings.maxRecordingTimeMinutes,
+        debugLogging: currentSettings.debugLogging,
       });
       isRecording = true;
       isListening = true;
       // Only clear previous session text if the previous session ended
       if (sessionEnded) {
-  originalChunks = [];
-  translatedChunks = [];
-  syncDisplays();
+        originalChunks = [];
+        translatedChunks = [];
+        syncDisplays();
         sessionEnded = false;
       }
       useWebSpeechAPI = false;
@@ -430,14 +431,17 @@
       // Stop recording with Rust backend services
       try {
         try {
-          await invoke("frontend_log", { tag: "stop_recording_attempt", payload: { ts: Date.now() } });
+          await invoke("frontend_log", {
+            tag: "stop_recording_attempt",
+            payload: { ts: Date.now() },
+          });
         } catch (e) {
           console.warn("frontend_log failed:", e);
         }
         await invoke("stop_recording");
         // Query backend authoritative state — stop_recording may be ignored during text insertion
         try {
-          const status = await invoke("get_recording_status") as boolean;
+          const status = (await invoke("get_recording_status")) as boolean;
           // Update UI based on actual backend state
           isRecording = status;
           isListening = status;
@@ -520,9 +524,9 @@
   }
 
   function clearText() {
-  originalChunks = [];
-  translatedChunks = [];
-  syncDisplays();
+    originalChunks = [];
+    translatedChunks = [];
+    syncDisplays();
   }
 
   async function copyToClipboard(text: string) {

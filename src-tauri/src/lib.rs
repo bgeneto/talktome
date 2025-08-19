@@ -291,7 +291,8 @@ async fn start_recording(
     translation_model: String,
     text_insertion_enabled: bool,
     audio_chunking_enabled: bool,
-    max_recording_time_minutes: u32
+    max_recording_time_minutes: u32,
+    debug_logging: bool
 ) -> Result<(), String> {
     // Check if already recording
     {
@@ -303,8 +304,12 @@ async fn start_recording(
 
     // Get API key (use default AppSettings instance for the method)
     DebugLogger::log_info("=== PIPELINE START: start_recording() called ===");
-    DebugLogger::log_info(&format!("Recording params: spoken_lang={}, translation_lang={}, endpoint={}, stt_model={}, auto_mute={}, translation_enabled={}, text_insertion_enabled={}, audio_chunking_enabled={}", 
-        spoken_language, translation_language, api_endpoint, stt_model, auto_mute, translation_enabled, text_insertion_enabled, audio_chunking_enabled));
+    DebugLogger::log_info(&format!("Recording params: spoken_lang={}, translation_lang={}, endpoint={}, stt_model={}, auto_mute={}, translation_enabled={}, text_insertion_enabled={}, audio_chunking_enabled={}, debug_logging={}", 
+        spoken_language, translation_language, api_endpoint, stt_model, auto_mute, translation_enabled, text_insertion_enabled, audio_chunking_enabled, debug_logging));
+    
+    // Update debug logging state to match the frontend preference
+    DebugLogger::init_with_state(&app, debug_logging)?;
+    DebugLogger::log_info(&format!("Debug logging state updated to: {}", debug_logging));
     
     let settings_for_api = AppSettings::default();
     let api_key = settings_for_api.get_api_key(&app).map_err(|e| {
@@ -330,7 +335,7 @@ async fn start_recording(
         },
         auto_mute,
         translation_enabled,
-        debug_logging: false, // Will be set properly by frontend debug logging state
+        debug_logging, // Use the value passed from frontend
         text_insertion_enabled,
         audio_chunking_enabled,
         max_recording_time_minutes,
@@ -781,18 +786,37 @@ async fn start_recording(
                             };
                             if stop {
                                 DebugLogger::log_info("STOP_REASON: Recording state set to false (single recording mode), draining remaining chunks before ending session");
-                                // Drain remaining chunks from the channel to prevent backup
+                                // Wait longer for the audio processing thread to send the final chunk
+                                DebugLogger::log_info("DRAIN_PHASE: Waiting for final audio processing to complete...");
                                 let drain_start = std::time::Instant::now();
                                 let mut drained_count = 0;
-                                while drain_start.elapsed() < std::time::Duration::from_millis(500) {
-                                    match audio_rx.try_recv() {
-                                        Ok(_) => drained_count += 1,
-                                        Err(_) => break,
+                                let mut final_chunk_received = false;
+                                
+                                // Wait up to 2 seconds for final chunk (audio processing takes time)
+                                while drain_start.elapsed() < std::time::Duration::from_millis(2000) {
+                                    match audio_rx.recv_timeout(std::time::Duration::from_millis(100)) {
+                                        Ok(chunk) => {
+                                            drained_count += 1;
+                                            final_chunk_received = true;
+                                            DebugLogger::log_info(&format!("DRAIN_PHASE: Received final audio chunk {} samples at {}Hz", chunk.data.len(), chunk.sample_rate));
+                                            
+                                            // Process this final chunk
+                                            if !chunk.data.is_empty() {
+                                                sample_rate = chunk.sample_rate;
+                                                all_audio_data.extend_from_slice(&chunk.data);
+                                            }
+                                        }
+                                        Err(_) => {
+                                            // Continue waiting if no final chunk yet
+                                            if final_chunk_received {
+                                                break; // We got the final chunk, no more expected
+                                            }
+                                            std::thread::sleep(std::time::Duration::from_millis(50));
+                                        }
                                     }
                                 }
-                                if drained_count > 0 {
-                                    DebugLogger::log_info(&format!("Single recording: drained {} remaining chunks from audio channel", drained_count));
-                                }
+                                
+                                DebugLogger::log_info(&format!("DRAIN_PHASE: Completed - received {} chunks, final_chunk_received: {}", drained_count, final_chunk_received));
                                 break;
                             }
                             
