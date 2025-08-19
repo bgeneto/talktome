@@ -291,29 +291,50 @@ function createSettingsStore() {
         return newSettings;
       });
     },
-    setApiKey: (key: string) => {
-      update(settings => {
-        // SECURITY: Store API key securely in backend only, never in localStorage
-        const newSettings = { ...settings, apiKey: key };
-        
-        // Save all OTHER settings to localStorage (excluding API key)
-        const settingsForLocalStorage = { ...newSettings, apiKey: "" }; // Set to empty instead of delete
-        localStorage.setItem('talktome-settings', JSON.stringify(settingsForLocalStorage));
-        
-        // Store API key securely in backend
-        invoke('store_api_key', { api_key: key })
-          .then(() => {
-            console.log('API key stored successfully in backend');
-          })
-          .catch(err => {
-            console.error('Failed to store API key securely:', err);
-          });
-        
-        // Sync other settings to backend for consistency
-        setTimeout(() => {
-          syncToBackend();
-        }, 0);
-        return newSettings;
+    setApiKey: async (key: string) => {
+      return new Promise((resolve, reject) => {
+        update(settings => {
+          // SECURITY: Store API key securely in backend only, never in localStorage
+          const newSettings = { ...settings, apiKey: key };
+          
+          // Save all OTHER settings to localStorage (excluding API key)
+          const settingsForLocalStorage = { ...newSettings, apiKey: "" }; // Set to empty instead of delete
+          localStorage.setItem('talktome-settings', JSON.stringify(settingsForLocalStorage));
+          
+          // Store API key securely in backend.
+          // Send both snake_case and camelCase forms to be robust against platform naming inconsistencies.
+          invoke('store_api_key', { api_key: key, apiKey: key })
+            .then(() => {
+              console.log('API key stored successfully in backend');
+              // Sync other settings to backend for consistency
+              setTimeout(() => {
+                syncToBackend();
+              }, 0);
+              resolve(newSettings);
+            })
+            .catch(err => {
+              console.error('Failed to store API key securely:', err);
+              // Extract a readable message when possible
+              let msg = 'Failed to store API key in backend';
+              try {
+                if (typeof err === 'string') msg = err;
+                else if (err && typeof err === 'object') {
+                  // Tauri sometimes wraps errors; try common fields
+                  msg = (err as any).toString() || msg;
+                  if ((err as any).message) msg = (err as any).message;
+                }
+              } catch (e) {
+                // ignore extraction errors
+              }
+              // Still update the store in memory so the user can use the key temporarily
+              setTimeout(() => {
+                syncToBackend();
+              }, 0);
+              reject(new Error(msg));
+            });
+          
+          return newSettings;
+        });
       });
     },
     setSttModel: (model: string) => {
@@ -399,26 +420,7 @@ function createSettingsStore() {
       }
     },
 
-    // Migration helpers for legacy API key -> Stronghold
-    async exportLegacyApiKey(): Promise<string | null> {
-      try {
-        const res = await invoke('export_legacy_api_key');
-        return (res as string) || null;
-      } catch (err) {
-        console.log('No legacy API key exported or error:', err);
-        return null;
-      }
-    },
-
-    async deleteLegacyApiKey(): Promise<boolean> {
-      try {
-        await invoke('delete_legacy_api_key');
-        return true;
-      } catch (err) {
-        console.error('Failed to delete legacy api.key:', err);
-        return false;
-      }
-    },
+  // Legacy migration removed: export/delete legacy api.key is no longer supported
 
 
     async fetchAvailableModels(endpoint?: string, apiKey?: string): Promise<{ success: boolean; models: string[]; message?: string }> {
@@ -580,7 +582,10 @@ function createSettingsStore() {
     },
 
     // Sync settings to backend
-    syncToBackend
+    syncToBackend,
+
+    // Load API key from backend
+    loadApiKeyFromBackend
   };
 }
 

@@ -196,6 +196,8 @@ async function savePreferences() {
       },
       autoMute: true,
       debugLogging: false
+  ,
+  textInsertionEnabled: true
     };
   persistSettings(currentSettings);
   applyTheme(currentSettings.theme as 'auto' | 'light' | 'dark');
@@ -346,7 +348,7 @@ async function savePreferences() {
               </p>
             {/if}
             <button 
-              on:click={() => invoke('get_log_file_path').then(path => navigator.clipboard.writeText(path)).catch(console.error)}
+              on:click={() => invoke('get_log_file_path').then((path:any) => navigator.clipboard.writeText(String(path))).catch(err => console.error('Failed to copy log path:', err))}
               class="mt-2 text-xs text-blue-600 dark:text-blue-400 underline hover:text-blue-800 dark:hover:text-blue-200"
             >
               Copy log path to clipboard

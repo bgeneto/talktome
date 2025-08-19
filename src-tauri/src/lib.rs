@@ -325,8 +325,8 @@ async fn start_recording(
     }
     // Wait for manager to reply with the audio receiver
     let audio_rx = match reply_rx.recv_timeout(std::time::Duration::from_secs(5)) {
-        Ok(Ok(rx)) => rx,
-        Ok(Err(e)) => {
+    Ok(Ok(rx)) => rx,
+    Ok(Err(e)) => {
             DebugLogger::log_pipeline_error("audio_manager", &e);
             return Err(e);
         }
@@ -1162,28 +1162,24 @@ fn quit_app(app: tauri::AppHandle) -> Result<(), String> {
 #[tauri::command]
 async fn store_api_key(app: AppHandle, api_key: String) -> Result<(), String> {
     DebugLogger::log_info(&format!("store_api_key called with key length: {}", api_key.len()));
-    let settings = AppSettings::default(); // Only need the methods, not loaded settings
-    settings.store_api_key(&app, api_key)?;
+    AppSettings::default().store_api_key(&app, api_key)?;
     DebugLogger::log_info("API key stored successfully in backend");
     Ok(())
 }
 
 #[tauri::command]
 async fn get_api_key(app: AppHandle) -> Result<String, String> {
-    let settings = AppSettings::default(); // Only need the methods, not loaded settings
-    settings.get_api_key(&app)
+    AppSettings::default().get_api_key(&app)
 }
 
 #[tauri::command]
 async fn debug_api_key_info(app: AppHandle) -> Result<serde_json::Value, String> {
-    let settings = AppSettings::default();
-    settings.debug_api_key_info(&app)
+    AppSettings::default().debug_api_key_info(&app)
 }
 
 #[tauri::command]
 async fn has_api_key(app: AppHandle) -> Result<bool, String> {
-    let settings = AppSettings::default(); // Only need the methods, not loaded settings
-    Ok(settings.has_api_key(&app))
+    Ok(AppSettings::default().has_api_key(&app))
 }
 
 // Removed update_api_endpoint - now using localStorage-only approach
@@ -1401,17 +1397,7 @@ async fn init_debug_logging(app: AppHandle, enabled: bool) -> Result<(), String>
     Ok(())
 }
 
-#[tauri::command]
-fn export_legacy_api_key(app: AppHandle) -> Result<Option<String>, String> {
-    let settings = AppSettings::default();
-    settings.export_legacy_api_key(&app)
-}
-
-#[tauri::command]
-fn delete_legacy_api_key(app: AppHandle) -> Result<(), String> {
-    let settings = AppSettings::default();
-    settings.delete_legacy_api_key(&app)
-}
+// Legacy migration commands removed
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
@@ -1503,8 +1489,6 @@ pub fn run() {
             get_api_key,
             has_api_key,
             debug_api_key_info,
-            export_legacy_api_key,
-            delete_legacy_api_key,
             get_available_audio_devices,
             test_audio_capture,
             get_recording_status,
