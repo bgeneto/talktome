@@ -288,7 +288,7 @@ getAvailableModels() -> Promise<string[]>
 
 1. **Translation + Correction Mode:**
    ```
-   Prompt: "Please correct any grammar, punctuation, and spelling errors in the following [SOURCE_LANG] text, then translate it to [TARGET_LANG]. Provide only the corrected and translated text without any additional commentary: [TEXT]"
+   Prompt: "Please correct any grammar, punctuation, and spelling errors in the following [SOURCE_LANG] text, then translate it to [TARGET_LANG]. Provide only the translated text without any additional commentary: [TEXT]"
    ```
 
 2. **Correction Only Mode:**

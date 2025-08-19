@@ -11,7 +11,8 @@
       handsFree: 'Ctrl+Win+Space'
     },
     autoMute: true,
-    debugLogging: false
+    debugLogging: false,
+    textInsertionEnabled: true
   };
 
   let saveSuccess = false;
@@ -48,6 +49,10 @@
     persistSettings({ debugLogging: currentSettings.debugLogging });
   }
 
+  function handleTextInsertionChange() {
+    persistSettings({ textInsertionEnabled: currentSettings.textInsertionEnabled });
+  }
+
   function applyTheme(theme: 'auto' | 'light' | 'dark') {
     // Map 'auto' to current system preference, then set DOM class and localStorage 'theme'
     let finalTheme: 'light' | 'dark' = 'light';
@@ -79,6 +84,10 @@
     
     if (updated.hasOwnProperty('debugLogging')) {
       settings.setDebugLogging(updated.debugLogging!);
+    }
+    
+    if (updated.hasOwnProperty('textInsertionEnabled')) {
+      settings.setTextInsertionEnabled(updated.textInsertionEnabled!);
     }
     
     if (updated.hasOwnProperty('theme')) {
@@ -296,7 +305,23 @@ async function savePreferences() {
           </label>
         </div>
         <p class="ml-6 text-xs text-gray-500 dark:text-gray-400">
-          Log detailed information about the record → transcribe → translate pipeline to help troubleshoot issues
+          Save detailed debug information to log file for troubleshooting
+        </p>
+
+        <div class="flex items-center">
+          <input
+            type="checkbox"
+            id="textInsertion"
+            bind:checked={currentSettings.textInsertionEnabled}
+            on:change={handleTextInsertionChange}
+            class="h-4 w-4 text-blue-600 focus:ring-blue-500 border-gray-300 rounded"
+          >
+          <label for="textInsertion" class="ml-2 block text-sm text-gray-700 dark:text-gray-300">
+            Enable automatic text insertion
+          </label>
+        </div>
+        <p class="ml-6 text-xs text-gray-500 dark:text-gray-400">
+          Automatically paste transcribed/translated text into the focused application using clipboard
         </p>
         
         <!-- Debug logging info -->

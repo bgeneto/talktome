@@ -16,6 +16,7 @@ interface Settings {
   };
   autoMute: boolean;
   debugLogging: boolean;
+  textInsertionEnabled: boolean;
   quickAccessLanguages: string[];
   vad: {
     speechThreshold: number;      // Energy threshold for speech detection
@@ -42,6 +43,7 @@ const defaultSettings: Settings = {
   },
   autoMute: true,
   debugLogging: false,
+  textInsertionEnabled: true,
   quickAccessLanguages: [],
   vad: {
     speechThreshold: 0.001,       // Sensitive for real-time
@@ -133,7 +135,8 @@ function createSettingsStore() {
         translation_enabled: currentSettings.translationLanguage !== 'none',
         debug_logging: currentSettings.debugLogging,
         push_to_talk_hotkey: currentSettings.hotkeys.pushToTalk,
-        hands_free_hotkey: currentSettings.hotkeys.handsFree
+        hands_free_hotkey: currentSettings.hotkeys.handsFree,
+        text_insertion_enabled: currentSettings.textInsertionEnabled
       });
     } catch (error) {
       console.error('Failed to sync settings to backend:', error);
@@ -221,6 +224,19 @@ function createSettingsStore() {
     setDebugLogging: (enabled: boolean) => {
       update(settings => {
         const newSettings = { ...settings, debugLogging: enabled };
+        // SECURITY: Never store API key in localStorage
+        const settingsForLocalStorage = { ...newSettings, apiKey: "" };
+        localStorage.setItem('talktome-settings', JSON.stringify(settingsForLocalStorage));
+        // Sync to backend
+        setTimeout(() => {
+          syncToBackend();
+        }, 0);
+        return newSettings;
+      });
+    },
+    setTextInsertionEnabled: (enabled: boolean) => {
+      update(settings => {
+        const newSettings = { ...settings, textInsertionEnabled: enabled };
         // SECURITY: Never store API key in localStorage
         const settingsForLocalStorage = { ...newSettings, apiKey: "" };
         localStorage.setItem('talktome-settings', JSON.stringify(settingsForLocalStorage));

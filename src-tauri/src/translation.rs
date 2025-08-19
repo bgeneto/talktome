@@ -30,15 +30,15 @@ impl TranslationService {
             DebugLogger::log_info("TRANSLATION: Mode = Translation + Correction");
             if source_lang == "auto" {
                 format!(
-                    "Please correct any grammar, punctuation, and spelling errors in the following text, then translate it to {}. \
-                    Provide only the corrected and translated text without any additional commentary:\n\n{}", 
+                    "Please correct any grammar, punctuation, and spelling errors, remove duplicated adjacent words in the following text, then translate it to {}. \
+                    Provide only the translated text without any additional commentary:\n\n{}", 
                     self.get_language_name(target_lang), 
                     text
                 )
             } else {
                 format!(
-                    "Please correct any grammar, punctuation, and spelling errors in the following {} text, then translate it to {}. \
-                    Provide only the corrected and translated text without any additional commentary:\n\n{}", 
+                    "Please correct any grammar, punctuation, and spelling errors, remove duplicated adjacent words in the following {} text, then translate it to {}. \
+                    Provide only the translated text without any additional commentary:\n\n{}", 
                     self.get_language_name(source_lang),
                     self.get_language_name(target_lang), 
                     text
@@ -49,7 +49,7 @@ impl TranslationService {
             DebugLogger::log_info("TRANSLATION: Mode = Correction only");
             format!(
                 "Please correct any grammar, punctuation, and spelling errors in the following text. \
-                Keep the same language and meaning, just fix any errors. \
+                Keep the same language and meaning, just fix any errors and duplicated adjacent words. \
                 Provide only the corrected text without any additional commentary:\n\n{}", 
                 text
             )

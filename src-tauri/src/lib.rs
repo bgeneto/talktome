@@ -266,7 +266,8 @@ async fn start_recording(
     stt_model: String,
     auto_mute: bool,
     translation_enabled: bool,
-    translation_model: String
+    translation_model: String,
+    text_insertion_enabled: bool
 ) -> Result<(), String> {
     // Check if already recording
     {
@@ -278,8 +279,8 @@ async fn start_recording(
 
     // Get API key (use default AppSettings instance for the method)
     DebugLogger::log_info("=== PIPELINE START: start_recording() called ===");
-    DebugLogger::log_info(&format!("Recording params: spoken_lang={}, translation_lang={}, endpoint={}, stt_model={}, auto_mute={}, translation_enabled={}", 
-        spoken_language, translation_language, api_endpoint, stt_model, auto_mute, translation_enabled));
+    DebugLogger::log_info(&format!("Recording params: spoken_lang={}, translation_lang={}, endpoint={}, stt_model={}, auto_mute={}, translation_enabled={}, text_insertion_enabled={}", 
+        spoken_language, translation_language, api_endpoint, stt_model, auto_mute, translation_enabled, text_insertion_enabled));
     
     let settings_for_api = AppSettings::default();
     let api_key = settings_for_api.get_api_key(&app).map_err(|e| {
@@ -306,6 +307,7 @@ async fn start_recording(
         auto_mute,
         translation_enabled,
         debug_logging: false, // Will be set properly by frontend debug logging state
+        text_insertion_enabled,
     };
     
     // Request the audio manager (single-thread owner) to start capture and return the receiver
@@ -472,6 +474,7 @@ async fn start_recording(
         let mut agg_text = String::new();
         let mut last_speech = Instant::now();
         let idle_threshold = Duration::from_millis(700);
+        let mut utterance_inserted = false; // Track if current utterance was already inserted
 
         fn append_dedup(agg: &mut String, next: &str) {
             // Token-aware suffix/prefix dedup: use last up to 12 chars as heuristic
@@ -492,11 +495,11 @@ async fn start_recording(
             // Check stop signal first
             match stop_rx.try_recv() {
                 Ok(_) => {
-                    DebugLogger::log_info("Stop signal received, breaking processing loop");
+                    DebugLogger::log_info("STOP_REASON: Stop signal received manually, breaking processing loop");
                     break;
                 }
                 Err(std::sync::mpsc::TryRecvError::Disconnected) => {
-                    DebugLogger::log_info("Stop signal channel disconnected, breaking processing loop");
+                    DebugLogger::log_info("STOP_REASON: Stop signal channel disconnected (audio system failure), breaking processing loop");
                     break;
                 }
                 Err(std::sync::mpsc::TryRecvError::Empty) => {
@@ -513,11 +516,12 @@ async fn start_recording(
                         !*state
                     };
                     if stop {
-                        DebugLogger::log_info("Recording stopped (timeout check), breaking processing loop");
+                        DebugLogger::log_info("STOP_REASON: Recording state set to false (timeout check), breaking processing loop");
                         break;
                     }
-                    if !agg_text.trim().is_empty() && last_speech.elapsed() >= idle_threshold {
+                    if !agg_text.trim().is_empty() && last_speech.elapsed() >= idle_threshold && !utterance_inserted {
                         DebugLogger::log_info("Idle timeout reached, flushing aggregated text (no explicit silence chunk)");
+                        let raw_text = agg_text.clone();
                         let final_text = if let Some(ref translation_service) = translation_service {
                             match translation_service.process_text(
                                 &agg_text,
@@ -530,19 +534,28 @@ async fn start_recording(
                             }
                         } else { agg_text.clone() };
                         DebugLogger::log_info("TEXT_INSERTION: queueing text for insertion (idle flush)");
-                        if let Err(e) = text_insertion_tx.send(final_text.clone()) {
-                            DebugLogger::log_pipeline_error("text_insertion", &format!("failed to queue text (idle flush): {}", e));
+                        if settings.text_insertion_enabled {
+                            if let Err(e) = text_insertion_tx.send(final_text.clone()) {
+                                DebugLogger::log_pipeline_error("text_insertion", &format!("failed to queue text (idle flush): {}", e));
+                            } else {
+                                DebugLogger::log_info("TEXT_INSERTION: queued (idle flush)");
+                                utterance_inserted = true; // Mark as inserted
+                            }
                         } else {
-                            DebugLogger::log_info("TEXT_INSERTION: queued (idle flush)");
+                            DebugLogger::log_info("TEXT_INSERTION: skipped (text insertion disabled)");
                         }
-                        let _ = app.emit("transcribed-text", &final_text);
+                        let _ = app.emit("transcribed-text", serde_json::json!({
+                            "raw": raw_text,
+                            "final": final_text
+                        }));
                         let _ = app.emit("processing-audio", false);
                         agg_text.clear();
+                        // Note: Don't reset utterance_inserted here, wait for next speech
                     }
                     continue;
                 }
                 Err(RecvTimeoutError::Disconnected) => {
-                    DebugLogger::log_info("Audio channel disconnected, breaking processing loop");
+                    DebugLogger::log_info("STOP_REASON: Audio channel disconnected (audio device/system failure), breaking processing loop");
                     break;
                 }
             };
@@ -552,14 +565,14 @@ async fn start_recording(
             {
                 let state = recording_state_clone.lock().unwrap();
                 if !*state {
-                    DebugLogger::log_info("Recording stopped, breaking audio processing loop");
+                    DebugLogger::log_info("STOP_REASON: Recording state set to false (chunk processing check), breaking audio processing loop");
                     break;
                 }
             }
             
             // Handle silence marker to flush utterance if idle long enough
             if matches!(audio_chunk.chunk_type, crate::audio::ChunkType::SilenceChunk) {
-                if !agg_text.trim().is_empty() && last_speech.elapsed() >= idle_threshold {
+                if !agg_text.trim().is_empty() && last_speech.elapsed() >= idle_threshold && !utterance_inserted {
                     DebugLogger::log_info(&format!("Idle >= {}ms, flushing utterance", idle_threshold.as_millis()));
                     let raw_text = agg_text.clone();
                     let final_text = if let Some(ref translation_service) = translation_service {
@@ -586,12 +599,17 @@ async fn start_recording(
 
                     // Insert text into focused application once per utterance
                     DebugLogger::log_info("TEXT_INSERTION: queueing text for insertion (silence flush)");
-                    if let Err(e) = text_insertion_tx.send(final_text.clone()) {
-                        DebugLogger::log_pipeline_error("text_insertion", &format!("failed to queue text (silence flush): {}", e));
-                        let _ = app.emit("processing-error", format!("Text insertion queue error: {}", e));
+                    if settings.text_insertion_enabled {
+                        if let Err(e) = text_insertion_tx.send(final_text.clone()) {
+                            DebugLogger::log_pipeline_error("text_insertion", &format!("failed to queue text (silence flush): {}", e));
+                            let _ = app.emit("processing-error", format!("Text insertion queue error: {}", e));
+                        } else {
+                            DebugLogger::log_text_insertion(&final_text, true, None);
+                            DebugLogger::log_info("TEXT_INSERTION: queued (silence flush)");
+                            utterance_inserted = true; // Mark as inserted
+                        }
                     } else {
-                        DebugLogger::log_text_insertion(&final_text, true, None);
-                        DebugLogger::log_info("TEXT_INSERTION: queued (silence flush)");
+                        DebugLogger::log_info("TEXT_INSERTION: skipped (text insertion disabled)");
                     }
                     let _ = app.emit("transcribed-text", serde_json::json!({
                         "raw": raw_text,
@@ -599,6 +617,7 @@ async fn start_recording(
                     }));
                     let _ = app.emit("processing-audio", false);
                     agg_text.clear();
+                    // Note: Don't reset utterance_inserted here, wait for next speech
                 }
                 continue;
             }
@@ -623,6 +642,10 @@ async fn start_recording(
                 Ok(transcribed_text) => {
                     DebugLogger::log_transcription_response(true, Some(&transcribed_text), None);
                     if !transcribed_text.trim().is_empty() {
+                        // If this is the start of a new utterance, reset the insertion flag
+                        if agg_text.is_empty() {
+                            utterance_inserted = false;
+                        }
                         append_dedup(&mut agg_text, &transcribed_text);
                         last_speech = Instant::now();
                         DebugLogger::log_info(&format!("Aggregated text length now: {}", agg_text.len()));
@@ -663,7 +686,7 @@ async fn start_recording(
         }
         
         // Final flush if any text remains
-        if !agg_text.trim().is_empty() {
+        if !agg_text.trim().is_empty() && !utterance_inserted {
             let raw_text = agg_text.clone();
             let final_text = if let Some(ref translation_service) = translation_service {
                 match translation_service.process_text(
@@ -679,10 +702,14 @@ async fn start_recording(
                 agg_text.clone()
             };
             DebugLogger::log_info("TEXT_INSERTION: queueing text for insertion (final flush)");
-            if let Err(e) = text_insertion_tx.send(final_text.clone()) {
-                DebugLogger::log_pipeline_error("text_insertion", &format!("failed to queue text (final flush): {}", e));
+            if settings.text_insertion_enabled {
+                if let Err(e) = text_insertion_tx.send(final_text.clone()) {
+                    DebugLogger::log_pipeline_error("text_insertion", &format!("failed to queue text (final flush): {}", e));
+                } else {
+                    DebugLogger::log_info("TEXT_INSERTION: queued (final flush)");
+                }
             } else {
-                DebugLogger::log_info("TEXT_INSERTION: queued (final flush)");
+                DebugLogger::log_info("TEXT_INSERTION: skipped (text insertion disabled)");
             }
             let _ = app.emit("transcribed-text", serde_json::json!({
                 "raw": raw_text,
@@ -694,6 +721,7 @@ async fn start_recording(
         {
             let mut state = recording_state_clone.lock().unwrap();
             *state = false;
+            DebugLogger::log_info("RECORDING_STATE_CHANGE: Set to false in pipeline cleanup (natural termination)");
             DebugLogger::log_info("Recording state set to false");
         }
         
@@ -726,6 +754,18 @@ fn stop_recording(
             DebugLogger::log_info("stop_recording invoked - last_hotkey: none");
         }
     }
+    
+    // Log call stack info to track unexpected stops
+    DebugLogger::log_info("STOP_RECORDING_CALLED: Analyzing call source...");
+    
+    // Check if this is a legitimate user-initiated stop vs automatic/unexpected stop
+    let user_initiated = if let Ok(suppress) = app.state::<InsertionSuppression>().inner().lock() {
+        !*suppress  // If not suppressed, it's likely user initiated
+    } else {
+        true
+    };
+    
+    DebugLogger::log_info(&format!("STOP_RECORDING_CALLED: user_initiated={}", user_initiated));
     // If a text insertion is in progress, ignore stop requests to avoid
     // aborting the recording mid-insert (text insertion runs in background).
     if let Ok(suppress) = app.state::<InsertionSuppression>().inner().lock() {
@@ -770,6 +810,7 @@ fn stop_recording(
     {
         let mut state = recording_state.inner().lock().map_err(|e| e.to_string())?;
         *state = false;
+        DebugLogger::log_info("RECORDING_STATE_CHANGE: Set to false in stop_recording command (user/external stop)");
         DebugLogger::log_info("Recording state set to false in stop_recording");
     }
     
@@ -1088,6 +1129,51 @@ async fn frontend_log(tag: String, payload: Option<serde_json::Value>) -> Result
     Ok(())
 }
 
+// Translation command for frontend
+#[tauri::command]
+async fn translate_text(
+    text: String,
+    source_lang: String,
+    target_lang: String,
+    app_state: State<'_, Mutex<AppSettings>>,
+    app: AppHandle
+) -> Result<String, String> {
+    DebugLogger::log_info(&format!("translate_text called: '{}' from {} to {}", text, source_lang, target_lang));
+    
+    // Get current settings and clone necessary values to avoid holding the lock across await
+    let (api_endpoint, translation_model) = {
+        let settings = app_state.lock().map_err(|e| format!("Failed to lock settings: {}", e))?;
+        (settings.api_endpoint.clone(), settings.translation_model.clone())
+    };
+    
+    // Get API key using the same method as start_recording
+    let settings_for_api = AppSettings::default();
+    let api_key = settings_for_api.get_api_key(&app).map_err(|e| {
+        let error_msg = format!("Failed to get API key: {}", e);
+        DebugLogger::log_info(&format!("No API key available for translation: {}", error_msg));
+        error_msg
+    })?;
+    
+    // Create translation service
+    let translation_service = TranslationService::new(
+        api_endpoint,
+        api_key,
+        translation_model
+    );
+    
+    // Perform translation
+    match translation_service.process_text(&text, &source_lang, &target_lang, true).await {
+        Ok(translated) => {
+            DebugLogger::log_info(&format!("Translation successful: '{}'", translated));
+            Ok(translated)
+        }
+        Err(e) => {
+            DebugLogger::log_info(&format!("Translation failed: {}", e));
+            Err(e)
+        }
+    }
+}
+
 // New commands for localStorage-based settings
 #[tauri::command]
 async fn load_settings_from_frontend() -> Result<String, String> {
@@ -1111,11 +1197,12 @@ async fn save_settings_from_frontend(
     translation_enabled: bool,
     debug_logging: bool,
     push_to_talk_hotkey: String,
-    hands_free_hotkey: String
+    hands_free_hotkey: String,
+    text_insertion_enabled: bool
 ) -> Result<(), String> {
     // Log the settings being saved (without logging the API key for security)
-    DebugLogger::log_info(&format!("SETTINGS_SAVE: spoken_language={}, translation_language={}, audio_device={}, theme={}, api_endpoint={}, stt_model={}, translation_model={}, api_key_provided={}, auto_mute={}, translation_enabled={}, debug_logging={}, push_to_talk={}, hands_free={}", 
-        spoken_language, translation_language, audio_device, theme, api_endpoint, stt_model, translation_model, !api_key.is_empty(), auto_mute, translation_enabled, debug_logging, push_to_talk_hotkey, hands_free_hotkey));
+    DebugLogger::log_info(&format!("SETTINGS_SAVE: spoken_language={}, translation_language={}, audio_device={}, theme={}, api_endpoint={}, stt_model={}, translation_model={}, api_key_provided={}, auto_mute={}, translation_enabled={}, debug_logging={}, push_to_talk={}, hands_free={}, text_insertion_enabled={}", 
+        spoken_language, translation_language, audio_device, theme, api_endpoint, stt_model, translation_model, !api_key.is_empty(), auto_mute, translation_enabled, debug_logging, push_to_talk_hotkey, hands_free_hotkey, text_insertion_enabled));
 
     // Store API key securely if provided and not empty
     // (Note: we now send empty string for security, so API key is stored separately via store_api_key command)
@@ -1250,6 +1337,7 @@ pub fn run() {
             get_log_file_path,
             get_data_directory_info,
             frontend_log,
+            translate_text,
             load_settings_from_frontend,
             save_settings_from_frontend,
             init_debug_logging

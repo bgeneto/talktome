@@ -216,28 +216,40 @@
         // and final is processed/translated text when translation is enabled.
         if (typeof payload === "string") {
           const finalText: string = payload;
-          // Heuristic: if payload contains non-ASCII characters (accents, ç, ã, etc.)
-          // it's likely the original language (e.g., Portuguese) and should go into
-          // the Original area; request client-side translation for it.
-          const hasNonAscii = /[^\x00-\x7F]/.test(finalText);
+          // For string payload, treat as original transcribed text only
+          pushChunkDedup(originalChunks, finalText);
+          
+          // Handle client-side translation if needed
           const translationEnabledUI = selectedTargetLang && selectedTargetLang !== "none" && selectedTargetLang !== selectedSourceLang;
-          if (hasNonAscii) {
-            pushChunkDedup(originalChunks, finalText);
-            if (translationEnabledUI) translateText(finalText, { append: true });
-          } else {
-            // ASCII-only: probably already translated (English) -> translated area
-            pushChunkDedup(translatedChunks, finalText);
+          if (translationEnabledUI) {
+            translateText(finalText, { append: true });
           }
           syncDisplays();
         } else if (payload) {
-          const raw: string = payload.raw ?? payload.final ?? "";
-          const finalT: string = payload.final ?? payload.raw ?? "";
-          if (raw) pushChunkDedup(originalChunks, raw);
-          if (finalT && selectedTargetLang && selectedTargetLang !== "none" && selectedTargetLang !== selectedSourceLang) {
-            pushChunkDedup(translatedChunks, finalT);
-          } else if (!finalT && raw && selectedTargetLang && selectedTargetLang !== "none" && selectedTargetLang !== selectedSourceLang) {
-            translateText(raw, { append: true });
+          // Handle structured payload with separate raw and final text
+          const raw: string = payload.raw ?? "";
+          const final: string = payload.final ?? "";
+          
+          // Always add raw text to original chunks (this is the actual transcription)
+          if (raw) {
+            pushChunkDedup(originalChunks, raw);
           }
+          
+          // Check if translation was enabled and we have different final text
+          const translationEnabledUI = selectedTargetLang && selectedTargetLang !== "none" && selectedTargetLang !== selectedSourceLang;
+          
+          if (translationEnabledUI && final && final !== raw) {
+            // Backend provided translated text, use it
+            pushChunkDedup(translatedChunks, final);
+          } else if (translationEnabledUI && raw) {
+            // Translation was enabled but backend didn't translate or returned same text
+            // Only try client-side translation if final is empty or same as raw
+            if (!final || final === raw) {
+              translateText(raw, { append: true });
+            }
+          }
+          // Note: If translation is disabled, we don't put anything in translatedChunks
+          
           syncDisplays();
         }
       }
@@ -300,6 +312,7 @@
         autoMute: currentSettings.autoMute,
         translationEnabled: currentSettings.translationLanguage !== "none",
         translationModel: currentSettings.translationModel,
+        textInsertionEnabled: currentSettings.textInsertionEnabled,
       });
       isRecording = true;
       isListening = true;
@@ -381,6 +394,7 @@
   }
 
   async function stopRecording() {
+    console.log("stopRecording() called - call stack:", new Error().stack);
     if (useWebSpeechAPI) {
       isRecording = false;
       isListening = false;
@@ -486,8 +500,9 @@
         }
       } catch (fallbackError) {
         console.error("Translation error with fallback API:", fallbackError);
-        // Fallback to placeholder translation
-        translatedText = `[Translation Error - Using fallback]: ${text}`;
+        // Don't add error messages to the translated text area
+        // Just log the error and leave the translation area empty for this chunk
+        console.warn("Skipping translation for this chunk due to errors");
       }
     } finally {
       isTranslating = false;

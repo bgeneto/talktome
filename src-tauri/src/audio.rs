@@ -566,11 +566,11 @@ impl AudioCapture {
                                     eprintln!("VAD chunk sent successfully (thread={:?})", std::thread::current().id());
                                 },
                                 Err(e) => {
-                                    // Channel is closed, stop recording to prevent infinite error loop
-                                    eprintln!("[audio.rs] tx.send failed: {:?} (thread={:?})", e, std::thread::current().id());
-                                    eprintln!("[audio.rs] Setting is_recording=false due to send failure");
-                                    *is_recording.lock().unwrap() = false;
-                                    return;
+                                    // Channel is temporarily full or busy - this is normal during text insertion
+                                    // Don't stop recording, just drop this chunk and continue
+                                    eprintln!("[audio.rs] tx.send failed (channel busy): {:?} (thread={:?})", e, std::thread::current().id());
+                                    eprintln!("[audio.rs] Dropping chunk and continuing recording (this is normal during text insertion)");
+                                    // Note: We do NOT set is_recording=false here - keep recording!
                                 }
                             }
                         }
