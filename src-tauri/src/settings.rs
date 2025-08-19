@@ -21,6 +21,7 @@ pub struct AppSettings {
     pub debug_logging: bool,
     pub text_insertion_enabled: bool,
     pub audio_chunking_enabled: bool,
+    pub max_recording_time_minutes: u32,
     // SECURITY: API key is NEVER stored in this struct or localStorage
     // It's handled separately via secure file storage (backend only)
     // Frontend stores it only in memory during runtime
@@ -52,6 +53,7 @@ impl Default for AppSettings {
             debug_logging: false,
             text_insertion_enabled: true,
             audio_chunking_enabled: true, // Default to true for backward compatibility
+            max_recording_time_minutes: 5, // Default to 5 minutes maximum recording time
         }
     }
 }

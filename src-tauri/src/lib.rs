@@ -290,7 +290,8 @@ async fn start_recording(
     translation_enabled: bool,
     translation_model: String,
     text_insertion_enabled: bool,
-    audio_chunking_enabled: bool
+    audio_chunking_enabled: bool,
+    max_recording_time_minutes: u32
 ) -> Result<(), String> {
     // Check if already recording
     {
@@ -332,6 +333,7 @@ async fn start_recording(
         debug_logging: false, // Will be set properly by frontend debug logging state
         text_insertion_enabled,
         audio_chunking_enabled,
+        max_recording_time_minutes,
     };
     
     // Request the audio manager (single-thread owner) to start capture and return the receiver
@@ -359,6 +361,11 @@ async fn start_recording(
         }
     };
     DebugLogger::log_info("Audio capture started successfully (owned by audio manager thread)");
+    
+    // Track recording start time for timeout monitoring
+    let recording_start_time = std::time::Instant::now();
+    let max_recording_duration = std::time::Duration::from_secs((max_recording_time_minutes as u64) * 60);
+    DebugLogger::log_info(&format!("Recording timeout set to {} minutes", max_recording_time_minutes));
     
     // Set recording state to true
     {
@@ -547,6 +554,23 @@ async fn start_recording(
                         DebugLogger::log_info("STOP_REASON: Recording state set to false (timeout check), breaking processing loop");
                         break;
                     }
+                    
+                    // Check if recording has exceeded max time limit
+                    if recording_start_time.elapsed() >= max_recording_duration {
+                        DebugLogger::log_info(&format!("STOP_REASON: Recording exceeded maximum time limit of {} minutes", max_recording_time_minutes));
+                        
+                        // Set recording state to false
+                        {
+                            let mut state = recording_state_clone.lock().unwrap();
+                            *state = false;
+                        }
+                        
+                        // Emit timeout notification to frontend
+                        let _ = app.emit("recording-timeout", ());
+                        
+                        break;
+                    }
+                    
                     // Continue waiting for more audio
                     continue;
                 }
@@ -771,6 +795,35 @@ async fn start_recording(
                                 }
                                 break;
                             }
+                            
+                            // Check if recording has exceeded max time limit
+                            if recording_start_time.elapsed() >= max_recording_duration {
+                                DebugLogger::log_info(&format!("STOP_REASON: Single recording exceeded maximum time limit of {} minutes", max_recording_time_minutes));
+                                
+                                // Set recording state to false
+                                {
+                                    let mut state = recording_state_single.lock().unwrap();
+                                    *state = false;
+                                }
+                                
+                                // Emit timeout notification to frontend
+                                let _ = app_single.emit("recording-timeout", ());
+                                
+                                // Drain remaining chunks and break
+                                let drain_start = std::time::Instant::now();
+                                let mut drained_count = 0;
+                                while drain_start.elapsed() < std::time::Duration::from_millis(500) {
+                                    match audio_rx.try_recv() {
+                                        Ok(_) => drained_count += 1,
+                                        Err(_) => break,
+                                    }
+                                }
+                                if drained_count > 0 {
+                                    DebugLogger::log_info(&format!("Single recording: drained {} remaining chunks from audio channel after timeout", drained_count));
+                                }
+                                break;
+                            }
+                            
                             continue; // Keep waiting for more audio
                         }
                         Err(RecvTimeoutError::Disconnected) => {
@@ -1350,6 +1403,17 @@ async fn init_debug_logging(app: AppHandle, enabled: bool) -> Result<(), String>
     Ok(())
 }
 
+#[tauri::command]
+async fn show_recording_timeout_notification(app: AppHandle, max_time_minutes: u32) -> Result<(), String> {
+    DebugLogger::log_info(&format!("Recording stopped due to maximum time limit of {} minutes", max_time_minutes));
+    
+    // Emit event to frontend to show tray notification
+    app.emit("show-recording-timeout-notification", max_time_minutes)
+        .map_err(|e| format!("Failed to emit timeout notification event: {}", e))?;
+    
+    Ok(())
+}
+
 // Legacy migration commands removed
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -1465,6 +1529,7 @@ pub fn run() {
             init_debug_logging
             , get_audio_manager_last_error
             , clear_audio_manager_last_error
+            , show_recording_timeout_notification
         ])
         .setup(|app| {
             // Initialize debug logging first (disabled by default, will be enabled by frontend)

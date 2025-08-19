@@ -18,6 +18,7 @@ interface Settings {
   debugLogging: boolean;
   textInsertionEnabled: boolean;
   audioChunkingEnabled: boolean;
+  maxRecordingTimeMinutes: number;
   quickAccessLanguages: string[];
   vad: {
     speechThreshold: number;      // Energy threshold for speech detection
@@ -45,7 +46,8 @@ const defaultSettings: Settings = {
   autoMute: true,
   debugLogging: false,
   textInsertionEnabled: true,
-  audioChunkingEnabled: true, // Default to true for backward compatibility
+  audioChunkingEnabled: false, // Default to false
+  maxRecordingTimeMinutes: 5, // Default to 5 minutes for safety
   quickAccessLanguages: [],
   vad: {
     speechThreshold: 0.001,       // Sensitive for real-time

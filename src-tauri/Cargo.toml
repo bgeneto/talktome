@@ -33,4 +33,5 @@ anyhow = "1"
 log = "0.4"
 env_logger = "0.11"
 chrono = { version = "0.4", features = ["serde"] }
+nnnoiseless = { version = "0.5", features = ["default"] }
 

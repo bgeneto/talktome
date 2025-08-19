@@ -12,7 +12,8 @@
     },
     autoMute: true,
     debugLogging: false,
-    textInsertionEnabled: true
+    textInsertionEnabled: true,
+    maxRecordingTimeMinutes: 5
   };
 
   let saveSuccess = false;
@@ -51,6 +52,16 @@
 
   function handleTextInsertionChange() {
     persistSettings({ textInsertionEnabled: currentSettings.textInsertionEnabled });
+  }
+
+  function handleMaxRecordingTimeChange() {
+    // Ensure the value is within valid range
+    if (currentSettings.maxRecordingTimeMinutes < 1) {
+      currentSettings.maxRecordingTimeMinutes = 1;
+    } else if (currentSettings.maxRecordingTimeMinutes > 60) {
+      currentSettings.maxRecordingTimeMinutes = 60;
+    }
+    persistSettings({ maxRecordingTimeMinutes: currentSettings.maxRecordingTimeMinutes });
   }
 
   function applyTheme(theme: 'auto' | 'light' | 'dark') {
@@ -324,6 +335,24 @@ async function savePreferences() {
         </div>
         <p class="ml-6 text-xs text-gray-500 dark:text-gray-400">
           Automatically paste transcribed/translated text into the focused application using clipboard
+        </p>
+
+        <div class="flex items-center mt-4">
+          <label for="maxRecordingTime" class="block text-sm text-gray-700 dark:text-gray-300 mr-3">
+            Max recording time (minutes):
+          </label>
+          <input
+            type="number"
+            id="maxRecordingTime"
+            bind:value={currentSettings.maxRecordingTimeMinutes}
+            on:change={handleMaxRecordingTimeChange}
+            min="1"
+            max="60"
+            class="w-20 px-2 py-1 text-sm border border-gray-300 dark:border-gray-600 rounded-md bg-white dark:bg-gray-700 text-gray-900 dark:text-gray-100 focus:ring-blue-500 focus:border-blue-500"
+          >
+        </div>
+        <p class="ml-6 text-xs text-gray-500 dark:text-gray-400">
+          Recording will automatically stop after this time limit for safety (1-60 minutes)
         </p>
         
         <!-- Debug logging info -->

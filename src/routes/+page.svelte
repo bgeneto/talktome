@@ -60,6 +60,7 @@
   let unlistenStopHK: () => void = () => {};
   let unlistenToggleHK: () => void = () => {};
   let unlistenRecordingStopped: () => void = () => {};
+  let unlistenRecordingTimeout: () => void = () => {};
 
   // Flag to indicate the previous transcription session ended. We only
   // clear accumulated UI text when starting a new session after the prior
@@ -276,6 +277,12 @@
         sessionEnded = true;
         showTrayNotification("Recording stopped");
       });
+
+      // Listen for recording timeout events
+      unlistenRecordingTimeout = await listen("recording-timeout", () => {
+        sessionEnded = true;
+        showTrayNotification("Recording stopped - time limit exceeded");
+      });
     })();
 
     return () => {
@@ -289,7 +296,8 @@
       unlistenTranscriptionUpdate();
       unlistenTrayStartRecording();
       unlistenTrayStopRecording();
-  unlistenRecordingStopped();
+      unlistenRecordingStopped();
+      unlistenRecordingTimeout();
     };
   });
 
@@ -314,6 +322,7 @@
         translationModel: currentSettings.translationModel,
         textInsertionEnabled: currentSettings.textInsertionEnabled,
         audioChunkingEnabled: currentSettings.audioChunkingEnabled,
+        maxRecordingTimeMinutes: currentSettings.maxRecordingTimeMinutes,
       });
       isRecording = true;
       isListening = true;
