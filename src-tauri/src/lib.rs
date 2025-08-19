@@ -500,12 +500,9 @@ async fn start_recording(
             // Move audio_rx into chunked mode
             let audio_rx = audio_rx;
             
-            // Aggregation state: accumulate text and flush on utterance boundary
-            use std::time::{Duration, Instant};
+            // Aggregation state: accumulate text until recording stops
+            use std::time::Duration;
             let mut agg_text = String::new();
-            let mut last_speech = Instant::now();
-            let idle_threshold = Duration::from_millis(700);
-            let mut utterance_inserted = false; // Track if current utterance was already inserted
 
             fn append_dedup(agg: &mut String, next: &str) {
                 // Token-aware suffix/prefix dedup: use last up to 12 chars as heuristic
@@ -541,7 +538,7 @@ async fn start_recording(
             let audio_chunk = match audio_rx.recv_timeout(Duration::from_millis(200)) {
                 Ok(chunk) => chunk,
                 Err(RecvTimeoutError::Timeout) => {
-                    // Periodically check for stop and idle flush
+                    // Periodically check for stop
                     let stop = {
                         let state = recording_state_clone.lock().unwrap();
                         !*state
@@ -550,39 +547,7 @@ async fn start_recording(
                         DebugLogger::log_info("STOP_REASON: Recording state set to false (timeout check), breaking processing loop");
                         break;
                     }
-                    if !agg_text.trim().is_empty() && last_speech.elapsed() >= idle_threshold && !utterance_inserted {
-                        DebugLogger::log_info("Idle timeout reached, flushing aggregated text (no explicit silence chunk)");
-                        let raw_text = agg_text.clone();
-                        let final_text = if let Some(ref translation_service) = translation_service {
-                            match translation_service.process_text(
-                                &agg_text,
-                                &settings.spoken_language,
-                                &settings.translation_language,
-                                settings.translation_enabled
-                            ).await {
-                                Ok(processed_text) => processed_text,
-                                Err(e) => { DebugLogger::log_pipeline_error("translation", &e); agg_text.clone() }
-                            }
-                        } else { agg_text.clone() };
-                        DebugLogger::log_info("TEXT_INSERTION: queueing text for insertion (idle flush)");
-                        if settings.text_insertion_enabled {
-                            if let Err(e) = text_insertion_tx.send(final_text.clone()) {
-                                DebugLogger::log_pipeline_error("text_insertion", &format!("failed to queue text (idle flush): {}", e));
-                            } else {
-                                DebugLogger::log_info("TEXT_INSERTION: queued (idle flush)");
-                                utterance_inserted = true; // Mark as inserted
-                            }
-                        } else {
-                            DebugLogger::log_info("TEXT_INSERTION: skipped (text insertion disabled)");
-                        }
-                        let _ = app.emit("transcribed-text", serde_json::json!({
-                            "raw": raw_text,
-                            "final": final_text
-                        }));
-                        let _ = app.emit("processing-audio", false);
-                        agg_text.clear();
-                        // Note: Don't reset utterance_inserted here, wait for next speech
-                    }
+                    // Continue waiting for more audio
                     continue;
                 }
                 Err(RecvTimeoutError::Disconnected) => {
@@ -601,58 +566,9 @@ async fn start_recording(
                 }
             }
             
-            // Handle silence marker to flush utterance if idle long enough
-            if matches!(audio_chunk.chunk_type, crate::audio::ChunkType::SilenceChunk) {
-                if !agg_text.trim().is_empty() && last_speech.elapsed() >= idle_threshold && !utterance_inserted {
-                    DebugLogger::log_info(&format!("Idle >= {}ms, flushing utterance", idle_threshold.as_millis()));
-                    let raw_text = agg_text.clone();
-                    let final_text = if let Some(ref translation_service) = translation_service {
-                        match translation_service.process_text(
-                            &agg_text,
-                            &settings.spoken_language,
-                            &settings.translation_language,
-                            settings.translation_enabled
-                        ).await {
-                            Ok(processed_text) => {
-                                DebugLogger::log_translation_response(true, Some(&processed_text), None, None);
-                                processed_text
-                            },
-                            Err(e) => {
-                                DebugLogger::log_translation_response(false, None, Some(&e), None);
-                                DebugLogger::log_pipeline_error("translation", &e);
-                                let _ = app.emit("processing-error", format!("Translation Error - Using fallback: {}", e));
-                                agg_text.clone()
-                            }
-                        }
-                    } else {
-                        agg_text.clone()
-                    };
-
-                    // Insert text into focused application once per utterance
-                    DebugLogger::log_info("TEXT_INSERTION: queueing text for insertion (silence flush)");
-                    if settings.text_insertion_enabled {
-                        if let Err(e) = text_insertion_tx.send(final_text.clone()) {
-                            DebugLogger::log_pipeline_error("text_insertion", &format!("failed to queue text (silence flush): {}", e));
-                            let _ = app.emit("processing-error", format!("Text insertion queue error: {}", e));
-                        } else {
-                            DebugLogger::log_text_insertion(&final_text, true, None);
-                            DebugLogger::log_info("TEXT_INSERTION: queued (silence flush)");
-                            utterance_inserted = true; // Mark as inserted
-                        }
-                    } else {
-                        DebugLogger::log_info("TEXT_INSERTION: skipped (text insertion disabled)");
-                    }
-                    let _ = app.emit("transcribed-text", serde_json::json!({
-                        "raw": raw_text,
-                        "final": final_text
-                    }));
-                    let _ = app.emit("processing-audio", false);
-                    agg_text.clear();
-                    // Note: Don't reset utterance_inserted here, wait for next speech
-                }
-                continue;
-            }
-
+            // Handle all audio chunks the same way in simplified mode
+            // No special handling for silence chunks needed
+            
             // Log audio chunk details
             let max_amplitude = audio_chunk.data.iter().map(|&x| x.abs()).fold(0.0, f32::max);
             let has_activity = audio_chunk.has_audio_activity();
@@ -673,13 +589,17 @@ async fn start_recording(
                 Ok(transcribed_text) => {
                     DebugLogger::log_transcription_response(true, Some(&transcribed_text), None);
                     if !transcribed_text.trim().is_empty() {
-                        // If this is the start of a new utterance, reset the insertion flag
-                        if agg_text.is_empty() {
-                            utterance_inserted = false;
-                        }
                         append_dedup(&mut agg_text, &transcribed_text);
-                        last_speech = Instant::now();
                         DebugLogger::log_info(&format!("Aggregated text length now: {}", agg_text.len()));
+                        
+                        // Store transcribed text but don't insert yet - wait for user to stop recording
+                        DebugLogger::log_info("TEXT_INSERTION: deferring until user stops recording");
+                        
+                        // Emit transcribed text to frontend for display (without final processing)
+                        let _ = app.emit("transcribed-text", serde_json::json!({
+                            "raw": agg_text,
+                            "final": agg_text  // Show raw text for now
+                        }));
                     }
                     let _ = app.emit("processing-audio", false);
                 }
@@ -716,9 +636,10 @@ async fn start_recording(
             DebugLogger::log_info("No system audio control to clean up");
         }
         
-        // Final flush if any text remains
-        if !agg_text.trim().is_empty() && !utterance_inserted {
+        // Final flush - process and insert text when recording stops
+        if !agg_text.trim().is_empty() {
             let raw_text = agg_text.clone();
+            DebugLogger::log_info("TEXT_INSERTION: processing final text after recording stopped");
             let final_text = if let Some(ref translation_service) = translation_service {
                 match translation_service.process_text(
                     &agg_text,
@@ -726,22 +647,35 @@ async fn start_recording(
                     &settings.translation_language,
                     settings.translation_enabled
                 ).await {
-                    Ok(processed_text) => processed_text,
-                    Err(_) => agg_text.clone(),
+                    Ok(processed_text) => {
+                        DebugLogger::log_translation_response(true, Some(&processed_text), None, None);
+                        processed_text
+                    },
+                    Err(e) => {
+                        DebugLogger::log_translation_response(false, None, Some(&e), None);
+                        DebugLogger::log_pipeline_error("translation", &e);
+                        let _ = app.emit("processing-error", format!("Translation Error - Using fallback: {}", e));
+                        agg_text.clone()
+                    }
                 }
             } else {
                 agg_text.clone()
             };
-            DebugLogger::log_info("TEXT_INSERTION: queueing text for insertion (final flush)");
+            
+            // Now insert the text since recording has stopped
+            DebugLogger::log_info("TEXT_INSERTION: queueing text for insertion (recording stopped)");
             if settings.text_insertion_enabled {
                 if let Err(e) = text_insertion_tx.send(final_text.clone()) {
                     DebugLogger::log_pipeline_error("text_insertion", &format!("failed to queue text (final flush): {}", e));
                 } else {
-                    DebugLogger::log_info("TEXT_INSERTION: queued (final flush)");
+                    DebugLogger::log_text_insertion(&final_text, true, None);
+                    DebugLogger::log_info("TEXT_INSERTION: queued (recording stopped)");
                 }
             } else {
                 DebugLogger::log_info("TEXT_INSERTION: skipped (text insertion disabled)");
             }
+            
+            // Emit final processed text to frontend
             let _ = app.emit("transcribed-text", serde_json::json!({
                 "raw": raw_text,
                 "final": final_text
@@ -886,12 +820,13 @@ async fn start_recording(
                                     transcription.clone()
                                 };
                                 
-                                // Insert text into focused application
+                                // In single recording mode, the recording has already stopped, so insert text
                                 if settings_single.text_insertion_enabled {
-                                    DebugLogger::log_info("TEXT_INSERTION: queueing complete transcription for insertion");
+                                    DebugLogger::log_info("TEXT_INSERTION: queueing complete transcription for insertion (single mode - recording already stopped)");
                                     if let Err(e) = text_insertion_tx_single.send(final_text.clone()) {
                                         DebugLogger::log_pipeline_error("text_insertion", &format!("failed to queue complete transcription: {}", e));
                                     } else {
+                                        DebugLogger::log_text_insertion(&final_text, true, None);
                                         DebugLogger::log_info("TEXT_INSERTION: queued complete transcription");
                                     }
                                 } else {
@@ -964,17 +899,13 @@ fn stop_recording(
     };
     
     DebugLogger::log_info(&format!("STOP_RECORDING_CALLED: user_initiated={}", user_initiated));
-    // If a text insertion is in progress, ignore stop requests to avoid
-    // aborting the recording mid-insert (text insertion runs in background).
-    if let Ok(suppress) = app.state::<InsertionSuppression>().inner().lock() {
-        if *suppress {
-            DebugLogger::log_info("stop_recording ignored because text insertion is in progress (InsertionSuppression=true)");
-            return Ok(());
-        }
-    }
+    
+    // In simplified mode, always allow user to stop recording
+    // Removed text insertion suppression check for better user control
+    
     // If we're not currently recording, ignore duplicate stop requests.
     // Also implement a short cooldown so rapid repeated Stop commands are dropped.
-    let cooldown_ms = 300u128;
+    let cooldown_ms = 100u128; // Reduced from 300ms for better responsiveness
     if let Ok(lst) = app.state::<LastStopTime>().inner().lock() {
         if let Some(prev) = *lst {
             let elapsed = prev.elapsed().as_millis();

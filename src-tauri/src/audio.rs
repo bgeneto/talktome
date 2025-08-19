@@ -1,6 +1,5 @@
-// This file contains the audio processing logic for the application.
-// It uses the cpal library for audio input and processing.
-// The following struct and implementations handle voice activity detection.
+// Simplified audio recording for TalkToMe
+// This module handles basic audio recording - start/stop only, no processing
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::{FromSample, Sample};
 use std::sync::{Arc, Mutex};
@@ -9,405 +8,23 @@ use crate::debug_logger::DebugLogger;
 
 pub struct AudioCapture {
     stream: Option<cpal::Stream>,
-    tx: Option<mpsc::Sender<AudioChunk>>,
     is_recording: Arc<Mutex<bool>>,
-    vad: Arc<Mutex<VoiceActivityDetector>>,
-    // Passthrough mode state: when true we accumulate raw samples locally and send only on stop
-    passthrough_enabled: Arc<Mutex<bool>>,
-    passthrough_buffer: Arc<Mutex<Vec<f32>>>,
-    // Max samples allowed in passthrough accumulation to avoid unbounded memory growth
-    passthrough_max_samples: Arc<Mutex<usize>>,
-    passthrough_full: Arc<Mutex<bool>>,
+    audio_buffer: Arc<Mutex<Vec<f32>>>,
+    sample_rate: Arc<Mutex<u32>>,
 }
 
-/// Voice Activity Detection configuration and state
-pub struct VoiceActivityDetector {
-    pub speech_threshold: f32,     // Energy threshold for speech detection
-    pub silence_threshold: f32,    // Energy threshold for silence
-    pub min_speech_duration_ms: u64,  // Minimum duration for speech chunk
-    pub max_speech_duration_ms: u64,  // Maximum duration for speech chunk
-    pub silence_timeout_ms: u64,   // Time to wait in silence before ending chunk
-    pub overlap_ms: u64,           // Overlap to prevent word cutting
-    
-    // Internal state
-    current_state: VadState,
-    state_start_time: std::time::Instant,
-    current_chunk: Vec<f32>,
-    overlap_buffer: Vec<f32>,      // Buffer for overlap handling
-    sample_rate: u32,
-
-    // Signal conditioning
-    hp_alpha: f32,
-    hp_prev_x: f32,
-    hp_prev_y: f32,
-    agc_gain: f32,
-    target_rms: f32,
-    gain_smooth: f32,
-    max_gain: f32,
-    noise_gate: f32,
-    ema_energy: f32,
-    ema_alpha: f32,
-    // Spectral subtraction PoC state
-    spec_frame_size: usize,
-    spec_hop_size: usize,
-    spec_window: Vec<f32>,
-    spec_input_buffer: Vec<f32>,
-    noise_mag_estimate: Vec<f32>,
-    spec_initialized: bool,
-}
-
-#[derive(Debug, Clone, PartialEq)]
-enum VadState {
-    Silence,
-    Speech,
-    SilenceAfterSpeech,
-}
-
-impl Default for VoiceActivityDetector {
-    fn default() -> Self {
-        Self {
-            // With AGC target RMS ~0.1, keep thresholds with hysteresis
-            speech_threshold: 0.02,
-            silence_threshold: 0.01,
-            min_speech_duration_ms: 350,
-            max_speech_duration_ms: 5000,   // up to 2.5s chunks for better utterance grouping
-            silence_timeout_ms: 500,
-            overlap_ms: 220,                // larger overlap to avoid mid-word cuts
-            
-            current_state: VadState::Silence,
-            state_start_time: std::time::Instant::now(),
-            current_chunk: Vec::new(),
-            overlap_buffer: Vec::new(),
-            sample_rate: 16000,
-
-            // Signal conditioning defaults (will be computed in new(sample_rate))
-            hp_alpha: 0.0,
-            hp_prev_x: 0.0,
-            hp_prev_y: 0.0,
-            agc_gain: 1.0,
-            target_rms: 0.1,
-            gain_smooth: 0.1,
-            max_gain: 8.0,
-            noise_gate: 0.003,
-            ema_energy: 0.0,
-            ema_alpha: 0.2,
-            // Spectral subtraction PoC state
-            spec_frame_size: 512,
-            spec_hop_size: 256,
-            spec_window: Vec::new(),
-            spec_input_buffer: Vec::new(),
-            noise_mag_estimate: Vec::new(),
-            spec_initialized: false,
-        }
-    }
-}
-
-impl VoiceActivityDetector {
-    pub fn new(sample_rate: u32) -> Self {
-        let mut vad = Self { sample_rate, ..Default::default() };
-        // Compute one-pole high-pass filter coefficient for ~100 Hz cutoff
-        let fc = 100.0_f32;
-        let dt = 1.0_f32 / sample_rate as f32;
-        let rc = 1.0_f32 / (2.0_f32 * std::f32::consts::PI * fc);
-        vad.hp_alpha = rc / (rc + dt);
-        // Initialize spectral subtraction window
-        vad.spec_window = (0..vad.spec_frame_size).map(|i| {
-            // Hann window
-            let n = i as f32;
-            let m = vad.spec_frame_size as f32;
-            0.5 * (1.0 - (2.0 * std::f32::consts::PI * n / (m - 1.0)).cos())
-        }).collect();
-        vad.noise_mag_estimate = vec![0.0; vad.spec_frame_size/2+1];
-        vad.spec_input_buffer = Vec::with_capacity(vad.spec_frame_size * 2);
-        vad.spec_initialized = true;
-        vad
-    }
-    
-    /// Process audio samples and return completed chunks
-    pub fn process_audio(&mut self, samples: &[f32]) -> Vec<AudioChunk> {
-        let mut completed_chunks = Vec::new();
-        // Copy and apply simple conditioning: high-pass, noise gate, AGC
-        let mut proc: Vec<f32> = Vec::with_capacity(samples.len());
-        for &x in samples {
-            // One-pole HPF
-            let y = self.hp_alpha * (self.hp_prev_y + x - self.hp_prev_x);
-            self.hp_prev_x = x;
-            self.hp_prev_y = y;
-            let mut s = y;
-            // Noise gate (pre-AGC)
-            if s.abs() < self.noise_gate {
-                s = 0.0;
-            }
-            proc.push(s);
-        }
-
-        // --- Spectral subtraction PoC (frame-based) ---
-        // Append processed samples to spec input buffer and run frames when enough samples
-        if self.spec_initialized {
-            self.spec_input_buffer.extend_from_slice(&proc);
-            // Process frames
-            let frame = self.spec_frame_size;
-            let hop = self.spec_hop_size;
-            use rustfft::{FftPlanner};
-            use num_complex::Complex;
-            let mut planner = FftPlanner::<f32>::new();
-            let fft = planner.plan_fft_forward(frame);
-            let ifft = planner.plan_fft_inverse(frame);
-
-            let mut i = 0usize;
-            while i + frame <= self.spec_input_buffer.len() {
-                // windowed frame
-                let mut buffer: Vec<Complex<f32>> = (0..frame).map(|n| {
-                    let w = self.spec_window[n] * self.spec_input_buffer[i + n];
-                    Complex::new(w, 0.0)
-                }).collect();
-
-                // forward
-                fft.process(&mut buffer);
-
-                // magnitude & phase
-                let mut mag: Vec<f32> = Vec::with_capacity(frame/2+1);
-                for k in 0..(frame/2+1) {
-                    let c = buffer[k];
-                    mag.push((c.re * c.re + c.im * c.im).sqrt());
-                }
-
-                // Update noise estimate during silence (use ema and current VAD energy)
-                let energy = self.calculate_energy(&self.spec_input_buffer[i..i+frame]);
-                if energy < self.silence_threshold {
-                    // smooth update
-                    for (n, v) in mag.iter().enumerate() {
-                        self.noise_mag_estimate[n] = self.noise_mag_estimate[n] * 0.9 + v * 0.1;
-                    }
-                }
-
-                // spectral subtraction: subtract noise magnitude estimate
-                let mut clean_spec: Vec<Complex<f32>> = Vec::with_capacity(frame);
-                for k in 0..(frame/2+1) {
-                    let s = mag[k] - self.noise_mag_estimate[k] * 1.0; // oversub factor 1.0
-                    let s_clamped = if s > 0.0 { s } else { 0.0 };
-                    // preserve original phase
-                    let orig = buffer[k];
-                    let phase = orig.arg();
-                    let re = s_clamped * phase.cos();
-                    let im = s_clamped * phase.sin();
-                    clean_spec.push(Complex::new(re, im));
-                }
-                // fold mirrored bins for full IFFT buffer
-                let mut full_spec: Vec<Complex<f32>> = vec![Complex::new(0.0,0.0); frame];
-                for k in 0..(frame/2+1) {
-                    full_spec[k] = clean_spec[k];
-                    if k > 0 && k < frame/2 {
-                        full_spec[frame - k] = Complex::new(clean_spec[k].re, -clean_spec[k].im);
-                    }
-                }
-
-                // inverse
-                ifft.process(&mut full_spec);
-
-                // overlap-add back into current_chunk (scale by window)
-                for n in 0..frame {
-                    let sample = full_spec[n].re / frame as f32; // normalise
-                    let added = sample * self.spec_window[n];
-                    // replace in input buffer (in-place)
-                    self.spec_input_buffer[i + n] = added;
-                }
-
-                i += hop;
-            }
-            // move remaining samples to new buffer
-            let remaining = self.spec_input_buffer.split_off(i);
-            self.spec_input_buffer = remaining;
-
-            // After denoising, copy processed samples back into proc for AGC/VAD processing
-            // Note: for PoC we simply overwrite proc with the recent denoised frames if available
-            // (this is approximate but acceptable for a PoC)
-            // For simplicity, limit to proc.len()
-            // If spec produced fewer samples, we keep original proc samples where not replaced
-            // (We won't attempt exact alignment here.)
-        }
-
-        // AGC: compute RMS and smooth gain
-        let rms = self.calculate_energy(&proc).max(1e-6);
-        let desired = (self.target_rms / rms).clamp(0.5, self.max_gain);
-        self.agc_gain = self.agc_gain * (1.0 - self.gain_smooth) + desired * self.gain_smooth;
-        for s in proc.iter_mut() {
-            *s = (*s * self.agc_gain).clamp(-1.0, 1.0);
-        }
-
-        // Add processed samples to current chunk
-        self.current_chunk.extend_from_slice(&proc);
-
-        // Calculate smoothed energy
-        let energy = self.calculate_energy(&proc);
-        self.ema_energy = self.ema_alpha * energy + (1.0 - self.ema_alpha) * self.ema_energy;
-        
-        // Determine if current samples contain speech
-        let has_speech = self.ema_energy > self.speech_threshold;
-        let is_silence = self.ema_energy < self.silence_threshold;
-        
-        let now = std::time::Instant::now();
-        let state_duration = now.duration_since(self.state_start_time);
-        
-        match self.current_state {
-            VadState::Silence => {
-                if has_speech {
-                    // Transition to speech - include overlap from previous chunk
-                    if !self.overlap_buffer.is_empty() {
-                        let mut chunk_with_overlap = self.overlap_buffer.clone();
-                        chunk_with_overlap.extend_from_slice(&self.current_chunk);
-                        self.current_chunk = chunk_with_overlap;
-                        self.overlap_buffer.clear();
-                    }
-                    self.current_state = VadState::Speech;
-                    self.state_start_time = now;
-                }
-                // In silence, emit an explicit silence chunk after a short idle to mark end-of-utterance
-                if state_duration.as_millis() > 800 && !self.current_chunk.is_empty() {
-                    // Send silence chunk after short idle to signal utterance boundary
-                    let chunk = AudioChunk::new(
-                        self.current_chunk.clone(),
-                        self.sample_rate,
-                        ChunkType::SilenceChunk,
-                    );
-                    completed_chunks.push(chunk);
-                    self.current_chunk.clear();
-                }
-            }
-            
-            VadState::Speech => {
-                if is_silence {
-                    // Transition to silence after speech
-                    self.current_state = VadState::SilenceAfterSpeech;
-                    self.state_start_time = now;
-                } else if state_duration.as_millis() > self.max_speech_duration_ms as u128 {
-                    // Force chunk completion if speech is too long
-                    self.complete_speech_chunk(&mut completed_chunks);
-                    self.current_state = VadState::Silence;
-                    self.state_start_time = now;
-                }
-            }
-            
-            VadState::SilenceAfterSpeech => {
-                if has_speech {
-                    // Return to speech
-                    self.current_state = VadState::Speech;
-                    self.state_start_time = now;
-                } else if state_duration.as_millis() > self.silence_timeout_ms as u128 {
-                    // Complete speech chunk after silence timeout
-                    if !self.current_chunk.is_empty() {
-                        let total_duration = ((self.current_chunk.len() as f32 / self.sample_rate as f32) * 1000.0) as u64;
-                        
-                        if total_duration >= self.min_speech_duration_ms {
-                            self.complete_speech_chunk(&mut completed_chunks);
-                        }
-                    }
-                    
-                    self.current_chunk.clear();
-                    self.current_state = VadState::Silence;
-                    self.state_start_time = now;
-                }
-            }
-        }
-        
-        completed_chunks
-    }
-    
-    /// Complete a speech chunk with overlap handling
-    fn complete_speech_chunk(&mut self, completed_chunks: &mut Vec<AudioChunk>) {
-        if self.current_chunk.is_empty() {
-            return;
-        }
-        
-        // Calculate overlap size in samples
-        let overlap_samples = ((self.overlap_ms as f32 / 1000.0) * self.sample_rate as f32) as usize;
-        
-        // Create the completed chunk
-        let chunk = AudioChunk::new(
-            self.current_chunk.clone(),
-            self.sample_rate,
-            ChunkType::SpeechChunk,
-        );
-        completed_chunks.push(chunk);
-        
-        // Save overlap for next chunk (last N samples)
-        if self.current_chunk.len() > overlap_samples {
-            let start_idx = self.current_chunk.len() - overlap_samples;
-            self.overlap_buffer = self.current_chunk[start_idx..].to_vec();
-        } else {
-            self.overlap_buffer = self.current_chunk.clone();
-        }
-        
-        self.current_chunk.clear();
-    }
-    
-    fn calculate_energy(&self, samples: &[f32]) -> f32 {
-        if samples.is_empty() {
-            return 0.0;
-        }
-        
-        // RMS energy calculation
-        let sum_squares: f32 = samples.iter().map(|&x| x * x).sum();
-        (sum_squares / samples.len() as f32).sqrt()
-    }
-    
-    /// Force completion of current chunk (useful when stopping recording)
-    #[allow(dead_code)]
-    pub fn flush(&mut self) -> Option<AudioChunk> {
-        if self.current_chunk.is_empty() {
-            return None;
-        }
-        
-        let chunk_type = match self.current_state {
-            VadState::Speech | VadState::SilenceAfterSpeech => ChunkType::SpeechChunk,
-            VadState::Silence => ChunkType::SilenceChunk,
-        };
-        
-        let chunk = AudioChunk::new(
-            self.current_chunk.clone(),
-            self.sample_rate,
-            chunk_type,
-        );
-        
-        self.current_chunk.clear();
-        self.overlap_buffer.clear(); // Clear overlap on flush
-        self.current_state = VadState::Silence;
-        self.state_start_time = std::time::Instant::now();
-        
-        Some(chunk)
-    }
-}
-
+/// Simple audio chunk containing raw audio data
 #[derive(Clone)]
 pub struct AudioChunk {
     pub data: Vec<f32>,
     pub sample_rate: u32,
-    #[allow(dead_code)]
-    pub timestamp: u64,
-    pub duration_ms: u64,
-    pub chunk_type: ChunkType,
-}
-
-#[derive(Debug, Clone)]
-pub enum ChunkType {
-    SpeechChunk,    // Contains speech activity
-    SilenceChunk,   // Contains only silence
-    #[allow(dead_code)]
-    Mixed,          // Contains both speech and silence
 }
 
 impl AudioChunk {
-    pub fn new(data: Vec<f32>, sample_rate: u32, chunk_type: ChunkType) -> Self {
-        let duration_ms = ((data.len() as f32 / sample_rate as f32) * 1000.0) as u64;
+    pub fn new(data: Vec<f32>, sample_rate: u32) -> Self {
         Self {
             data,
             sample_rate,
-            timestamp: std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_millis() as u64,
-            duration_ms,
-            chunk_type,
         }
     }
 
@@ -417,71 +34,32 @@ impl AudioChunk {
 
     /// Check if audio chunk has sufficient volume to process
     pub fn has_audio_activity(&self) -> bool {
-        match self.chunk_type {
-            ChunkType::SpeechChunk | ChunkType::Mixed => true,
-            ChunkType::SilenceChunk => false,
-        }
+        // Simple volume check - consider it active if any sample is above threshold
+        let threshold = 0.01; // Adjust as needed
+        self.data.iter().any(|&sample| sample.abs() > threshold)
     }
 }
-
 impl AudioCapture {
     pub fn new() -> Self {
         Self {
             stream: None,
-            tx: None,
             is_recording: Arc::new(Mutex::new(false)),
-            vad: Arc::new(Mutex::new(VoiceActivityDetector::default())),
-            passthrough_enabled: Arc::new(Mutex::new(false)),
-            passthrough_buffer: Arc::new(Mutex::new(Vec::new())),
-            passthrough_max_samples: Arc::new(Mutex::new(0)),
-            passthrough_full: Arc::new(Mutex::new(false)),
+            audio_buffer: Arc::new(Mutex::new(Vec::new())),
+            sample_rate: Arc::new(Mutex::new(16000)), // Default sample rate
         }
     }
 
-    #[allow(dead_code)]
-    pub fn stop_recording(&mut self) -> Result<(), Box<dyn std::error::Error>> {
-        // Set recording flag to false
-        *self.is_recording.lock().unwrap() = false;
-        
-        // If passthrough accumulation is enabled, send accumulated buffer as one chunk
-        if *self.passthrough_enabled.lock().unwrap() {
-            let mut buf = self.passthrough_buffer.lock().unwrap();
-            if !buf.is_empty() {
-                if let Some(ref tx) = self.tx {
-                    // Use VAD's sample_rate which was initialized in start_capture
-                    let sr = self.vad.lock().unwrap().sample_rate;
-                    let chunk = AudioChunk::new(buf.clone(), sr, ChunkType::SpeechChunk);
-                    eprintln!("Sending final passthrough chunk: {} samples", chunk.data.len());
-                    let _ = tx.send(chunk);
-                }
-                buf.clear();
-            }
-            // Clear passthrough flag
-            *self.passthrough_enabled.lock().unwrap() = false;
-        } else {
-            // Flush any remaining audio from VAD
-            if let Ok(mut vad_guard) = self.vad.lock() {
-                if let Some(final_chunk) = vad_guard.flush() {
-                    if let Some(ref tx) = self.tx {
-                        eprintln!("Sending final VAD chunk: {} samples, type: {:?}", 
-                                 final_chunk.data.len(), final_chunk.chunk_type);
-                        let _ = tx.send(final_chunk);
-                    }
-                }
-            }
-        }
-        
-        // Stop and drop the stream
-        if let Some(stream) = self.stream.take() {
-            drop(stream);
-        }
-        
-        self.tx = None;
-        Ok(())
-    }
-
-    pub fn start_capture(&mut self, audio_chunking_enabled: bool) -> Result<mpsc::Receiver<AudioChunk>, Box<dyn std::error::Error + Send + Sync>> {
+    /// Start recording audio from the default microphone
+    pub fn start_capture(&mut self, _audio_chunking_enabled: bool) -> Result<mpsc::Receiver<AudioChunk>, Box<dyn std::error::Error + Send + Sync>> {
         DebugLogger::log_info("AudioCapture::start_capture() called");
+        
+        // Check if already recording
+        {
+            let recording = self.is_recording.lock().unwrap();
+            if *recording {
+                return Err("Already recording".into());
+            }
+        }
         
         let host = cpal::default_host();
         DebugLogger::log_info(&format!("Audio host: {:?}", host.id()));
@@ -494,66 +72,113 @@ impl AudioCapture {
         DebugLogger::log_info(&format!("Audio config: sample_rate={}Hz, channels={}, format={:?}", 
             sample_rate, config.channels(), config.sample_format()));
         
-        // Initialize VAD with correct sample rate
-        if let Ok(mut vad_guard) = self.vad.lock() {
-            *vad_guard = VoiceActivityDetector::new(sample_rate);
+        // Store sample rate
+        {
+            let mut sr = self.sample_rate.lock().unwrap();
+            *sr = sample_rate;
         }
-        DebugLogger::log_info(&format!("VAD initialized with sample rate: {}Hz", sample_rate));
         
-        // Create a channel for sending audio chunks
-        let (tx, rx) = mpsc::channel(); // Synchronous unbounded channel
-        DebugLogger::log_info("Audio channel created with buffer size 50");
+        // Clear audio buffer
+        {
+            let mut buffer = self.audio_buffer.lock().unwrap();
+            buffer.clear();
+        }
+        
+        // Create a channel for sending the final audio chunk when recording stops
+        let (tx, rx) = mpsc::channel();
         
         // Set recording state to true
-        *self.is_recording.lock().unwrap() = true;
+        {
+            let mut recording = self.is_recording.lock().unwrap();
+            *recording = true;
+        }
         DebugLogger::log_info("Audio recording state set to true");
         
-        // Configure passthrough accumulation when chunking is disabled
-        if !audio_chunking_enabled {
-            *self.passthrough_enabled.lock().unwrap() = true;
-            let mut buf = self.passthrough_buffer.lock().unwrap();
-            buf.clear();
-            // Set maximum allowed samples (5 minutes cap)
-            let mut max_samples = self.passthrough_max_samples.lock().unwrap();
-            *max_samples = (5 * 60 * sample_rate) as usize; // 5 minutes
-            *self.passthrough_full.lock().unwrap() = false;
-            DebugLogger::log_info(&format!("Passthrough accumulation enabled (chunking disabled), max_samples={}", *max_samples));
-        } else {
-            *self.passthrough_enabled.lock().unwrap() = false;
-            *self.passthrough_max_samples.lock().unwrap() = 0;
-            *self.passthrough_full.lock().unwrap() = false;
-        }
-    let stream = match config.sample_format() {
+        // Build the audio stream
+        let stream = match config.sample_format() {
             cpal::SampleFormat::F32 => {
                 DebugLogger::log_info("Building F32 input stream");
-        self.build_input_stream::<f32>(&device, &config.into(), tx.clone(), sample_rate, audio_chunking_enabled)?
+                self.build_input_stream::<f32>(&device, &config.into(), sample_rate)?
             },
             cpal::SampleFormat::I16 => {
                 DebugLogger::log_info("Building I16 input stream");
-        self.build_input_stream::<i16>(&device, &config.into(), tx.clone(), sample_rate, audio_chunking_enabled)?
+                self.build_input_stream::<i16>(&device, &config.into(), sample_rate)?
             },
             cpal::SampleFormat::U16 => {
                 DebugLogger::log_info("Building U16 input stream");
-        self.build_input_stream::<u16>(&device, &config.into(), tx.clone(), sample_rate, audio_chunking_enabled)?
+                self.build_input_stream::<u16>(&device, &config.into(), sample_rate)?
             },
             _ => return Err("Unsupported sample format".into()),
         };
         
-        DebugLogger::log_info("Starting audio stream playback");
+        DebugLogger::log_info("Starting audio stream");
         stream.play()?;
         self.stream = Some(stream);
-        self.tx = Some(tx);
+        
+        // Spawn a thread to monitor for stop and send the final audio chunk
+        let audio_buffer = self.audio_buffer.clone();
+        let is_recording = self.is_recording.clone();
+        let sample_rate_arc = self.sample_rate.clone();
+        
+        std::thread::spawn(move || {
+            // Wait for recording to stop
+            loop {
+                std::thread::sleep(std::time::Duration::from_millis(100));
+                let recording = is_recording.lock().unwrap();
+                if !*recording {
+                    break;
+                }
+            }
+            
+            // Get the final audio data
+            let final_audio = {
+                let buffer = audio_buffer.lock().unwrap();
+                buffer.clone()
+            };
+            
+            let sr = {
+                let sample_rate = sample_rate_arc.lock().unwrap();
+                *sample_rate
+            };
+            
+            if !final_audio.is_empty() {
+                DebugLogger::log_info(&format!("Sending final audio chunk: {} samples, {}Hz", final_audio.len(), sr));
+                let chunk = AudioChunk::new(final_audio, sr);
+                let _ = tx.send(chunk);
+            } else {
+                DebugLogger::log_info("No audio data recorded");
+            }
+        });
         
         DebugLogger::log_info("Audio capture started successfully");
         Ok(rx)
     }
+    
+    /// Stop recording and clean up
+    pub fn stop_recording(&mut self) -> Result<(), Box<dyn std::error::Error>> {
+        DebugLogger::log_info("AudioCapture::stop_recording() called");
+        
+        // Set recording flag to false
+        {
+            let mut recording = self.is_recording.lock().unwrap();
+            *recording = false;
+        }
+        DebugLogger::log_info("Recording state set to false");
+        
+        // Stop and drop the stream
+        if let Some(stream) = self.stream.take() {
+            drop(stream);
+            DebugLogger::log_info("Audio stream stopped and dropped");
+        }
+        
+        Ok(())
+    }
+    
     fn build_input_stream<T>(
         &self,
         device: &cpal::Device,
         config: &cpal::StreamConfig,
-        tx: mpsc::Sender<AudioChunk>,
         sample_rate: u32,
-        audio_chunking_enabled: bool,
     ) -> Result<cpal::Stream, Box<dyn std::error::Error + Send + Sync>>
     where
         T: Sample + cpal::SizedSample + Send + 'static,
@@ -563,103 +188,31 @@ impl AudioCapture {
         DebugLogger::log_info(&format!("Audio stream config: channels={}, sample_rate={}Hz", 
             channels, sample_rate));
         
-    // Use the VAD from self and passthrough state/buffer
-    let vad = self.vad.clone();
-    let is_recording = self.is_recording.clone();
-    let passthrough_enabled = self.passthrough_enabled.clone();
-    let passthrough_buffer = self.passthrough_buffer.clone();
-    let passthrough_max_samples = self.passthrough_max_samples.clone();
-    let passthrough_full = self.passthrough_full.clone();
+        let is_recording = self.is_recording.clone();
+        let audio_buffer = self.audio_buffer.clone();
         
         let stream = device.build_input_stream(
             config,
-            {
-                let tx = tx.clone();
-                let vad = vad.clone();
-                let is_recording = is_recording.clone();
-                let passthrough_enabled = passthrough_enabled.clone();
-                let passthrough_buffer = passthrough_buffer.clone();
-                let passthrough_max_samples = passthrough_max_samples.clone();
-                let passthrough_full = passthrough_full.clone();
+            move |data: &[T], _: &cpal::InputCallbackInfo| {
+                // Only process if we're recording
+                if !*is_recording.lock().unwrap() {
+                    return;
+                }
+
+                // Convert samples to f32 and take only first channel (mono)
+                let samples: Vec<f32> = data.chunks(channels)
+                    .map(|chunk| chunk[0].to_sample())
+                    .collect();
                 
-                move |data: &[T], _: &cpal::InputCallbackInfo| {
-                    // Only process if we're recording
-                    if !*is_recording.lock().unwrap() {
-                        // Extra debug: indicate that an audio callback came in while not recording
-                        eprintln!("[audio.rs] audio callback received but is_recording=false (thread={:?})", std::thread::current().id());
-                        return;
-                    }
-
-                    // Convert samples to f32 and take only first channel (mono)
-                    let samples: Vec<f32> = data.chunks(channels)
-                        .map(|chunk| chunk[0].to_sample())
-                        .collect();
-                    
-                    // Log the first few audio callbacks to verify we're receiving data
-                    use std::sync::atomic::{AtomicU32, Ordering};
-                    static CALLBACK_COUNT: AtomicU32 = AtomicU32::new(0);
-                    let count = CALLBACK_COUNT.fetch_add(1, Ordering::Relaxed);
-                    if count < 5 {
-                        eprintln!("Audio callback #{}: received {} samples", count + 1, samples.len());
-                    }
-                    
-                    if audio_chunking_enabled {
-                        // Process audio through VAD
-                        if let Ok(mut vad_guard) = vad.lock() {
-                            let completed_chunks = vad_guard.process_audio(&samples);
-
-                            // Send any completed chunks
-                            for chunk in completed_chunks {
-                                eprintln!("VAD produced chunk: {} samples, type: {:?}, duration: {}ms (thread={:?})", 
-                                         chunk.data.len(), chunk.chunk_type, chunk.duration_ms, std::thread::current().id());
-
-                                match tx.send(chunk) {
-                                    Ok(_) => {
-                                        eprintln!("VAD chunk sent successfully (thread={:?})", std::thread::current().id());
-                                    },
-                                    Err(e) => {
-                                        // Channel is temporarily full or busy - this is normal during text insertion
-                                        // Don't stop recording, just drop this chunk and continue
-                                        eprintln!("[audio.rs] tx.send failed (channel busy): {:?} (thread={:?})", e, std::thread::current().id());
-                                        eprintln!("[audio.rs] Dropping chunk and continuing recording (this is normal during text insertion)");
-                                        // Note: We do NOT set is_recording=false here - keep recording!
-                                    }
-                                }
-                            }
-                        }
-                    } else {
-                        // Passthrough accumulation mode: append incoming samples to local buffer to be sent on stop
-                        if *passthrough_enabled.lock().unwrap() {
-                            let mut buf = passthrough_buffer.lock().unwrap();
-                            let mut full = passthrough_full.lock().unwrap();
-                            if !*full {
-                                let max = *passthrough_max_samples.lock().unwrap();
-                                let remaining = if buf.len() >= max { 0 } else { max - buf.len() };
-                                if remaining >= samples.len() {
-                                    buf.extend_from_slice(&samples);
-                                } else if remaining > 0 {
-                                    buf.extend_from_slice(&samples[..remaining]);
-                                    *full = true;
-                                    eprintln!("[audio.rs] Passthrough buffer reached max capacity ({} samples); further input will be dropped", max);
-                                } else {
-                                    *full = true;
-                                }
-                            }
-                        } else {
-                            // Fallback: if passthrough not enabled, send immediate mixed chunk
-                            let chunk = AudioChunk::new(samples, sample_rate, ChunkType::Mixed);
-                            match tx.send(chunk) {
-                                Ok(_) => {},
-                                Err(e) => {
-                                    eprintln!("[audio.rs] passthrough tx.send failed: {:?} (thread={:?})", e, std::thread::current().id());
-                                }
-                            }
-                        }
-                    }
+                // Append to buffer
+                {
+                    let mut buffer = audio_buffer.lock().unwrap();
+                    buffer.extend_from_slice(&samples);
                 }
             },
             move |err| {
                 eprintln!("Audio input error: {}", err);
+                DebugLogger::log_info(&format!("Audio input error: {}", err));
             },
             None,
         )?;
