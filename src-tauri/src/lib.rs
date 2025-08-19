@@ -6,6 +6,8 @@ use tauri::{
 use tauri_plugin_global_shortcut::{Code, Modifiers, Shortcut, ShortcutState, GlobalShortcutExt};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
+// Global last-audio-manager error for diagnostics (frontend can query this)
+static AUDIO_MANAGER_LAST_ERROR: Mutex<Option<String>> = Mutex::new(None);
 use std::sync::mpsc as std_mpsc;
 // no additional thread/state for AudioCapture; it's not Send
 mod settings;
@@ -38,7 +40,9 @@ type LastHotkey = Arc<Mutex<Option<(String, std::time::Instant)>>>;
 enum AudioManagerCommand {
     Start {
         // reply channel to send back the audio chunk receiver or error
-        reply: std_mpsc::Sender<Result<std_mpsc::Receiver<crate::audio::AudioChunk>, String>>,
+    reply: std_mpsc::Sender<Result<std_mpsc::Receiver<crate::audio::AudioChunk>, String>>,
+    // Whether frontend requested real-time chunking (VAD). If false, capture should operate in passthrough
+    audio_chunking_enabled: bool,
     },
     Stop {
         // optional reply to acknowledge stop
@@ -138,6 +142,24 @@ fn parse_hotkey(hotkey: &str) -> Result<Shortcut, String> {
     
     let code = key_code.ok_or_else(|| "No key specified in hotkey".to_string())?;
     Ok(Shortcut::new(Some(modifiers), code))
+}
+
+/// Get last audio manager error (for diagnostics)
+#[tauri::command]
+fn get_audio_manager_last_error() -> Option<String> {
+    if let Ok(err) = AUDIO_MANAGER_LAST_ERROR.lock() {
+        err.clone()
+    } else {
+        None
+    }
+}
+
+/// Clear the last audio manager error
+#[tauri::command]
+fn clear_audio_manager_last_error() {
+    if let Ok(mut err) = AUDIO_MANAGER_LAST_ERROR.lock() {
+        *err = None;
+    }
 }
 
 // Command to register hotkeys
@@ -317,7 +339,7 @@ async fn start_recording(
     let (reply_tx, reply_rx) = std_mpsc::channel();
     {
         let sender = audio_manager.lock().map_err(|e| e.to_string())?;
-        sender.send(AudioManagerCommand::Start { reply: reply_tx }).map_err(|e| {
+        sender.send(AudioManagerCommand::Start { reply: reply_tx, audio_chunking_enabled }).map_err(|e| {
             let msg = format!("Failed to send start command to audio manager: {}", e);
             DebugLogger::log_pipeline_error("audio_manager", &msg);
             msg
@@ -647,7 +669,7 @@ async fn start_recording(
 
             // Transcribe audio chunk
             DebugLogger::log_info("=== STARTING STT TRANSCRIPTION ===");
-            match stt_service.transcribe_chunk(audio_chunk.data, audio_chunk.sample_rate).await {
+            match stt_service.transcribe_chunk(audio_chunk.data, audio_chunk.sample_rate, None).await {
                 Ok(transcribed_text) => {
                     DebugLogger::log_transcription_response(true, Some(&transcribed_text), None);
                     if !transcribed_text.trim().is_empty() {
@@ -742,7 +764,9 @@ async fn start_recording(
             let settings_single = settings.clone();
             let text_insertion_tx_single = text_insertion_tx.clone();
             
-            tokio::spawn(async move {
+            // Run single recording session inline and await completion so the outer pipeline
+            // does not proceed to cleanup while the single-recording task is still active.
+            (async move {
                 let mut all_audio_data: Vec<f32> = Vec::new();
                 let mut sample_rate = 48000; // Default sample rate, will be updated from first chunk
                 
@@ -825,8 +849,6 @@ async fn start_recording(
                     if !audio_chunk.data.is_empty() {
                         sample_rate = audio_chunk.sample_rate;
                         all_audio_data.extend_from_slice(&audio_chunk.data);
-                        DebugLogger::log_info(&format!("Single recording: collected {} samples, total: {} samples ({:.1}s)", 
-                            audio_chunk.data.len(), all_audio_data.len(), all_audio_data.len() as f32 / sample_rate as f32));
                     }
                 }
                 
@@ -838,7 +860,7 @@ async fn start_recording(
                     // Convert to WAV format and send to STT service
                     DebugLogger::log_info("Sending complete recording to STT service...");
                     
-                    match stt_service_single.transcribe_chunk(all_audio_data, sample_rate).await {
+                    match stt_service_single.transcribe_chunk(all_audio_data, sample_rate, Some("stt_single")).await {
                             Ok(transcription) => {
                                 DebugLogger::log_info(&format!("STT complete transcription: '{}'", transcription));
                                 
@@ -890,7 +912,7 @@ async fn start_recording(
                 } else {
                     DebugLogger::log_info("Single recording session ended with no audio data collected");
                 }
-            });
+            }).await;
         }
 
         // Common cleanup for both modes
@@ -1432,16 +1454,22 @@ pub fn run() {
                 let mut audio_capture_opt: Option<AudioCapture> = None;
                 for cmd in cmd_rx.iter() {
                     match cmd {
-                        AudioManagerCommand::Start { reply } => {
+                        AudioManagerCommand::Start { reply, audio_chunking_enabled } => {
                             DebugLogger::log_info("Audio manager received Start command");
                             // If already started, return error
                             if audio_capture_opt.is_some() {
-                                let _ = reply.send(Err("Audio capture already started".to_string()));
+                                DebugLogger::log_info("Audio manager received duplicate Start - capture already running");
+                                let err_msg = "Audio capture already started; call stop_recording() before starting a new capture".to_string();
+                                // store for diagnostics
+                                if let Ok(mut last_err) = AUDIO_MANAGER_LAST_ERROR.lock() {
+                                    *last_err = Some(err_msg.clone());
+                                }
+                                let _ = reply.send(Err(err_msg));
                                 continue;
                             }
                             // Create and start capture (only once)
                             let mut capture = AudioCapture::new();
-                            match capture.start_capture() {
+                            match capture.start_capture(audio_chunking_enabled) {
                                 Ok(rx) => {
                                     audio_capture_opt = Some(capture);
                                     DebugLogger::log_info("Audio manager successfully started capture and returned receiver");
@@ -1465,6 +1493,9 @@ pub fn run() {
                                 }
                             } else {
                                 DebugLogger::log_info("Audio manager Stop called but no active capture was present (cap was None)");
+                                if let Ok(mut last_err) = AUDIO_MANAGER_LAST_ERROR.lock() {
+                                    *last_err = Some("Stop called but no active capture present".to_string());
+                                }
                             }
                             if let Some(r) = reply {
                                 let _ = r.send(Ok(()));
@@ -1501,6 +1532,8 @@ pub fn run() {
             load_settings_from_frontend,
             save_settings_from_frontend,
             init_debug_logging
+            , get_audio_manager_last_error
+            , clear_audio_manager_last_error
         ])
         .setup(|app| {
             // Initialize debug logging first (disabled by default, will be enabled by frontend)

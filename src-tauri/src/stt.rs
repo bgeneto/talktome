@@ -28,7 +28,7 @@ impl STTService {
     }
 
     /// Transcribe audio chunk with enhanced error handling
-    pub async fn transcribe_chunk(&self, audio_data: Vec<f32>, sample_rate: u32) -> Result<String, String> {
+    pub async fn transcribe_chunk(&self, audio_data: Vec<f32>, sample_rate: u32, label: Option<&str>) -> Result<String, String> {
         DebugLogger::log_info("=== STT: transcribe_chunk() called ===");
         DebugLogger::log_info(&format!("STT: Input audio_data.len()={}, sample_rate={}", audio_data.len(), sample_rate));
         
@@ -70,7 +70,8 @@ impl STTService {
         DebugLogger::log_transcription_request(audio_bytes.len(), &self.api_endpoint);
         
         // Save exact WAV payload to logs for debugging (only for requests we actually send)
-        if let Some(path) = DebugLogger::save_wav_dump("stt_request", &audio_bytes) {
+        let dump_label = label.unwrap_or("stt_request");
+        if let Some(path) = DebugLogger::save_wav_dump(dump_label, &audio_bytes) {
             DebugLogger::log_info(&format!("STT: Saved WAV dump to {}", path.display()));
         } else {
             DebugLogger::log_info("STT: Could not save WAV dump (no log path yet?)");

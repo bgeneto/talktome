@@ -12,6 +12,12 @@ pub struct AudioCapture {
     tx: Option<mpsc::Sender<AudioChunk>>,
     is_recording: Arc<Mutex<bool>>,
     vad: Arc<Mutex<VoiceActivityDetector>>,
+    // Passthrough mode state: when true we accumulate raw samples locally and send only on stop
+    passthrough_enabled: Arc<Mutex<bool>>,
+    passthrough_buffer: Arc<Mutex<Vec<f32>>>,
+    // Max samples allowed in passthrough accumulation to avoid unbounded memory growth
+    passthrough_max_samples: Arc<Mutex<usize>>,
+    passthrough_full: Arc<Mutex<bool>>,
 }
 
 /// Voice Activity Detection configuration and state
@@ -425,6 +431,10 @@ impl AudioCapture {
             tx: None,
             is_recording: Arc::new(Mutex::new(false)),
             vad: Arc::new(Mutex::new(VoiceActivityDetector::default())),
+            passthrough_enabled: Arc::new(Mutex::new(false)),
+            passthrough_buffer: Arc::new(Mutex::new(Vec::new())),
+            passthrough_max_samples: Arc::new(Mutex::new(0)),
+            passthrough_full: Arc::new(Mutex::new(false)),
         }
     }
 
@@ -433,13 +443,30 @@ impl AudioCapture {
         // Set recording flag to false
         *self.is_recording.lock().unwrap() = false;
         
-        // Flush any remaining audio from VAD
-        if let Ok(mut vad_guard) = self.vad.lock() {
-            if let Some(final_chunk) = vad_guard.flush() {
+        // If passthrough accumulation is enabled, send accumulated buffer as one chunk
+        if *self.passthrough_enabled.lock().unwrap() {
+            let mut buf = self.passthrough_buffer.lock().unwrap();
+            if !buf.is_empty() {
                 if let Some(ref tx) = self.tx {
-                    eprintln!("Sending final VAD chunk: {} samples, type: {:?}", 
-                             final_chunk.data.len(), final_chunk.chunk_type);
-                    let _ = tx.send(final_chunk);
+                    // Use VAD's sample_rate which was initialized in start_capture
+                    let sr = self.vad.lock().unwrap().sample_rate;
+                    let chunk = AudioChunk::new(buf.clone(), sr, ChunkType::SpeechChunk);
+                    eprintln!("Sending final passthrough chunk: {} samples", chunk.data.len());
+                    let _ = tx.send(chunk);
+                }
+                buf.clear();
+            }
+            // Clear passthrough flag
+            *self.passthrough_enabled.lock().unwrap() = false;
+        } else {
+            // Flush any remaining audio from VAD
+            if let Ok(mut vad_guard) = self.vad.lock() {
+                if let Some(final_chunk) = vad_guard.flush() {
+                    if let Some(ref tx) = self.tx {
+                        eprintln!("Sending final VAD chunk: {} samples, type: {:?}", 
+                                 final_chunk.data.len(), final_chunk.chunk_type);
+                        let _ = tx.send(final_chunk);
+                    }
                 }
             }
         }
@@ -453,7 +480,7 @@ impl AudioCapture {
         Ok(())
     }
 
-    pub fn start_capture(&mut self) -> Result<mpsc::Receiver<AudioChunk>, Box<dyn std::error::Error + Send + Sync>> {
+    pub fn start_capture(&mut self, audio_chunking_enabled: bool) -> Result<mpsc::Receiver<AudioChunk>, Box<dyn std::error::Error + Send + Sync>> {
         DebugLogger::log_info("AudioCapture::start_capture() called");
         
         let host = cpal::default_host();
@@ -481,18 +508,33 @@ impl AudioCapture {
         *self.is_recording.lock().unwrap() = true;
         DebugLogger::log_info("Audio recording state set to true");
         
-        let stream = match config.sample_format() {
+        // Configure passthrough accumulation when chunking is disabled
+        if !audio_chunking_enabled {
+            *self.passthrough_enabled.lock().unwrap() = true;
+            let mut buf = self.passthrough_buffer.lock().unwrap();
+            buf.clear();
+            // Set maximum allowed samples (5 minutes cap)
+            let mut max_samples = self.passthrough_max_samples.lock().unwrap();
+            *max_samples = (5 * 60 * sample_rate) as usize; // 5 minutes
+            *self.passthrough_full.lock().unwrap() = false;
+            DebugLogger::log_info(&format!("Passthrough accumulation enabled (chunking disabled), max_samples={}", *max_samples));
+        } else {
+            *self.passthrough_enabled.lock().unwrap() = false;
+            *self.passthrough_max_samples.lock().unwrap() = 0;
+            *self.passthrough_full.lock().unwrap() = false;
+        }
+    let stream = match config.sample_format() {
             cpal::SampleFormat::F32 => {
                 DebugLogger::log_info("Building F32 input stream");
-                self.build_input_stream::<f32>(&device, &config.into(), tx.clone(), sample_rate)?
+        self.build_input_stream::<f32>(&device, &config.into(), tx.clone(), sample_rate, audio_chunking_enabled)?
             },
             cpal::SampleFormat::I16 => {
                 DebugLogger::log_info("Building I16 input stream");
-                self.build_input_stream::<i16>(&device, &config.into(), tx.clone(), sample_rate)?
+        self.build_input_stream::<i16>(&device, &config.into(), tx.clone(), sample_rate, audio_chunking_enabled)?
             },
             cpal::SampleFormat::U16 => {
                 DebugLogger::log_info("Building U16 input stream");
-                self.build_input_stream::<u16>(&device, &config.into(), tx.clone(), sample_rate)?
+        self.build_input_stream::<u16>(&device, &config.into(), tx.clone(), sample_rate, audio_chunking_enabled)?
             },
             _ => return Err("Unsupported sample format".into()),
         };
@@ -511,6 +553,7 @@ impl AudioCapture {
         config: &cpal::StreamConfig,
         tx: mpsc::Sender<AudioChunk>,
         sample_rate: u32,
+        audio_chunking_enabled: bool,
     ) -> Result<cpal::Stream, Box<dyn std::error::Error + Send + Sync>>
     where
         T: Sample + cpal::SizedSample + Send + 'static,
@@ -520,9 +563,13 @@ impl AudioCapture {
         DebugLogger::log_info(&format!("Audio stream config: channels={}, sample_rate={}Hz", 
             channels, sample_rate));
         
-        // Use the VAD from self
-        let vad = self.vad.clone();
-        let is_recording = self.is_recording.clone();
+    // Use the VAD from self and passthrough state/buffer
+    let vad = self.vad.clone();
+    let is_recording = self.is_recording.clone();
+    let passthrough_enabled = self.passthrough_enabled.clone();
+    let passthrough_buffer = self.passthrough_buffer.clone();
+    let passthrough_max_samples = self.passthrough_max_samples.clone();
+    let passthrough_full = self.passthrough_full.clone();
         
         let stream = device.build_input_stream(
             config,
@@ -530,6 +577,10 @@ impl AudioCapture {
                 let tx = tx.clone();
                 let vad = vad.clone();
                 let is_recording = is_recording.clone();
+                let passthrough_enabled = passthrough_enabled.clone();
+                let passthrough_buffer = passthrough_buffer.clone();
+                let passthrough_max_samples = passthrough_max_samples.clone();
+                let passthrough_full = passthrough_full.clone();
                 
                 move |data: &[T], _: &cpal::InputCallbackInfo| {
                     // Only process if we're recording
@@ -552,25 +603,55 @@ impl AudioCapture {
                         eprintln!("Audio callback #{}: received {} samples", count + 1, samples.len());
                     }
                     
-                    // Process audio through VAD
-                    if let Ok(mut vad_guard) = vad.lock() {
-                        let completed_chunks = vad_guard.process_audio(&samples);
-                        
-                        // Send any completed chunks
-                        for chunk in completed_chunks {
-                            eprintln!("VAD produced chunk: {} samples, type: {:?}, duration: {}ms (thread={:?})", 
-                                     chunk.data.len(), chunk.chunk_type, chunk.duration_ms, std::thread::current().id());
-                            
+                    if audio_chunking_enabled {
+                        // Process audio through VAD
+                        if let Ok(mut vad_guard) = vad.lock() {
+                            let completed_chunks = vad_guard.process_audio(&samples);
+
+                            // Send any completed chunks
+                            for chunk in completed_chunks {
+                                eprintln!("VAD produced chunk: {} samples, type: {:?}, duration: {}ms (thread={:?})", 
+                                         chunk.data.len(), chunk.chunk_type, chunk.duration_ms, std::thread::current().id());
+
+                                match tx.send(chunk) {
+                                    Ok(_) => {
+                                        eprintln!("VAD chunk sent successfully (thread={:?})", std::thread::current().id());
+                                    },
+                                    Err(e) => {
+                                        // Channel is temporarily full or busy - this is normal during text insertion
+                                        // Don't stop recording, just drop this chunk and continue
+                                        eprintln!("[audio.rs] tx.send failed (channel busy): {:?} (thread={:?})", e, std::thread::current().id());
+                                        eprintln!("[audio.rs] Dropping chunk and continuing recording (this is normal during text insertion)");
+                                        // Note: We do NOT set is_recording=false here - keep recording!
+                                    }
+                                }
+                            }
+                        }
+                    } else {
+                        // Passthrough accumulation mode: append incoming samples to local buffer to be sent on stop
+                        if *passthrough_enabled.lock().unwrap() {
+                            let mut buf = passthrough_buffer.lock().unwrap();
+                            let mut full = passthrough_full.lock().unwrap();
+                            if !*full {
+                                let max = *passthrough_max_samples.lock().unwrap();
+                                let remaining = if buf.len() >= max { 0 } else { max - buf.len() };
+                                if remaining >= samples.len() {
+                                    buf.extend_from_slice(&samples);
+                                } else if remaining > 0 {
+                                    buf.extend_from_slice(&samples[..remaining]);
+                                    *full = true;
+                                    eprintln!("[audio.rs] Passthrough buffer reached max capacity ({} samples); further input will be dropped", max);
+                                } else {
+                                    *full = true;
+                                }
+                            }
+                        } else {
+                            // Fallback: if passthrough not enabled, send immediate mixed chunk
+                            let chunk = AudioChunk::new(samples, sample_rate, ChunkType::Mixed);
                             match tx.send(chunk) {
-                                Ok(_) => {
-                                    eprintln!("VAD chunk sent successfully (thread={:?})", std::thread::current().id());
-                                },
+                                Ok(_) => {},
                                 Err(e) => {
-                                    // Channel is temporarily full or busy - this is normal during text insertion
-                                    // Don't stop recording, just drop this chunk and continue
-                                    eprintln!("[audio.rs] tx.send failed (channel busy): {:?} (thread={:?})", e, std::thread::current().id());
-                                    eprintln!("[audio.rs] Dropping chunk and continuing recording (this is normal during text insertion)");
-                                    // Note: We do NOT set is_recording=false here - keep recording!
+                                    eprintln!("[audio.rs] passthrough tx.send failed: {:?} (thread={:?})", e, std::thread::current().id());
                                 }
                             }
                         }
