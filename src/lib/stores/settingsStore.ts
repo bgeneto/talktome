@@ -47,7 +47,7 @@ const defaultSettings: Settings = {
   debugLogging: false,
   textInsertionEnabled: true,
   audioChunkingEnabled: false, // Default to false
-  maxRecordingTimeMinutes: 5, // Default to 5 minutes for safety
+  maxRecordingTimeMinutes: 2, // Default to 5 minutes for safety
   quickAccessLanguages: [],
   vad: {
     speechThreshold: 0.001, // Sensitive for real-time
