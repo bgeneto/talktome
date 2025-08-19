@@ -54,10 +54,6 @@
   let unlistenTranslationLanguage: () => void = () => {};
   let unlistenAudioDevice: () => void = () => {};
   let unlistenTranscriptionUpdate: () => void = () => {};
-  let unlistenTrayStartRecording: () => void = () => {};
-  let unlistenTrayStopRecording: () => void = () => {};
-  let unlistenStartHK: () => void = () => {};
-  let unlistenStopHK: () => void = () => {};
   let unlistenToggleHK: () => void = () => {};
   let unlistenRecordingStopped: () => void = () => {};
   let unlistenRecordingTimeout: () => void = () => {};
@@ -166,44 +162,51 @@
 
       // Debounce guard to prevent rapid toggles from key repeat or programmatic loops
       let lastToggle = 0;
-      function guard(ms = 400) {
+      function guard(ms = 150) {
         const now = Date.now();
-        if (now - lastToggle < ms) return false;
+        const elapsed = now - lastToggle;
+        if (elapsed < ms) {
+          console.log(`Guard blocked hotkey (${elapsed}ms < ${ms}ms)`);
+          return false;
+        }
         lastToggle = now;
+        console.log(`Guard allowed hotkey (${elapsed}ms >= ${ms}ms)`);
         return true;
       }
 
-      // Declare unlisten placeholders for hotkeys
-      let unlistenStartHK = () => {};
-      let unlistenStopHK = () => {};
+      // Declare unlisten placeholder for hands-free hotkey
       let unlistenToggleHK = () => {};
 
       // Explicit hotkey events from backend
       try {
+        console.log("Attempting to register hotkeys:", {
+          handsFree: currentSettings.hotkeys.handsFree,
+        });
         await invoke("register_hotkeys", {
           hotkeys: {
-            pushToTalk: currentSettings.hotkeys.pushToTalk,
             handsFree: currentSettings.hotkeys.handsFree,
           },
         });
         console.log("Hotkeys registered successfully:", {
-          pushToTalk: currentSettings.hotkeys.pushToTalk,
           handsFree: currentSettings.hotkeys.handsFree,
         });
       } catch (error) {
         console.error("Failed to register hotkeys:", error);
       }
 
-      unlistenStartHK = await listen("start-recording-from-hotkey", () => {
-        if (!isRecording && guard()) startRecording();
-      });
-      unlistenStopHK = await listen("stop-recording-from-hotkey", () => {
-        if (isRecording && guard()) stopRecording();
-      });
       unlistenToggleHK = await listen("toggle-recording-from-hotkey", () => {
-        if (!guard()) return;
-        if (isRecording) stopRecording();
-        else startRecording();
+        console.log("toggle-recording-from-hotkey event received, isRecording:", isRecording);
+        if (!guard()) {
+          console.log("Guard prevented hotkey action due to debounce");
+          return;
+        }
+        if (isRecording) {
+          console.log("Currently recording, calling stopRecording()");
+          stopRecording();
+        } else {
+          console.log("Not recording, calling startRecording()");
+          startRecording();
+        }
       });
 
       // Listen for finalized utterances from Rust backend
@@ -266,16 +269,6 @@
         }
       );
 
-      // Listen for recording started event from tray
-      unlistenTrayStartRecording = await listen("tray-start-recording", () => {
-        startRecording();
-      });
-
-      // Listen for recording stopped event from tray
-      unlistenTrayStopRecording = await listen("tray-stop-recording", () => {
-        stopRecording();
-      });
-
       // Listen to backend recording-stopped to mark session ended
       unlistenRecordingStopped = await listen("recording-stopped", () => {
         sessionEnded = true;
@@ -294,18 +287,15 @@
       unlistenSpokenLanguage();
       unlistenTranslationLanguage();
       unlistenAudioDevice();
-      unlistenStartHK();
-      unlistenStopHK();
       unlistenToggleHK();
       unlistenTranscriptionUpdate();
-      unlistenTrayStartRecording();
-      unlistenTrayStopRecording();
       unlistenRecordingStopped();
       unlistenRecordingTimeout();
     };
   });
 
   async function startRecording() {
+    console.log("startRecording() called, current isRecording:", isRecording);
     // Try to start recording with Rust backend services first
     try {
       // Get current settings from localStorage
@@ -333,6 +323,7 @@
         debugLogging: currentSettings.debugLogging,
       });
       isRecording = true;
+      console.log("Recording started successfully, isRecording:", isRecording);
       isListening = true;
       // Only clear previous session text if the previous session ended
       if (sessionEnded) {
@@ -448,19 +439,23 @@
           console.warn("frontend_log failed:", e);
         }
         await invoke("stop_recording");
+        console.log("stop_recording command sent to backend");
         // Query backend authoritative state — stop_recording may be ignored during text insertion
         try {
           const status = (await invoke("get_recording_status")) as boolean;
+          console.log("Backend recording status after stop:", status);
           // Update UI based on actual backend state
           isRecording = status;
           isListening = status;
           if (!status) audioLevel = 0;
+          console.log("Frontend isRecording state updated to:", isRecording);
         } catch (e) {
           // If we can't query status, conservatively stop UI state to avoid stuck UI
           console.warn("get_recording_status failed:", e);
           isRecording = false;
           isListening = false;
           audioLevel = 0;
+          console.log("Frontend isRecording state reset to false due to error");
         }
       } catch (error) {
         console.error("Failed to stop recording with Rust backend:", error);

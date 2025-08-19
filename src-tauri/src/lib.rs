@@ -29,8 +29,6 @@ use debug_logger::DebugLogger;
 type HotkeyRegistry = Mutex<HashMap<String, String>>;
 type RecordingState = Arc<Mutex<bool>>;
 type AudioStopSender = Arc<Mutex<Option<std::sync::mpsc::Sender<()>>>>;
-// Flag used to temporarily suppress stop events while we perform text insertion
-type InsertionSuppression = Arc<Mutex<bool>>;
 // Track last stop timestamp to avoid rapid duplicate stops (cooldown)
 type LastStopTime = Arc<Mutex<Option<std::time::Instant>>>;
 // Track the last hotkey action and when it happened to help debug stop origins
@@ -205,7 +203,7 @@ fn parse_hotkey(hotkey: &str) -> Result<Shortcut, String> {
     }
     
     // Handle modifier-only combinations
-    // For combinations like Ctrl+Win or Shift+Ctrl+Alt, we need to use a placeholder key
+    // For combinations like Ctrl+Shift+Space or Shift+Ctrl+Alt, we need to use a placeholder key
     // We'll use a key that's unlikely to conflict with normal usage
     if key_code.is_none() {
         // Check if we have valid modifier combinations
@@ -299,9 +297,6 @@ async fn register_hotkeys(
         let app_for_emit = app.clone();
         global_shortcut
             .on_shortcut(shortcut, move |app_handle, _sc, ev| {
-                    // Read insertion suppression early
-                    let suppress = *app_handle.state::<InsertionSuppression>().inner().lock().unwrap();
-
                     // Debounce repeated hotkey firings from programmatic input (ms)
                     let debounce_ms = 150u128;
                     if let Ok(mut last_hotkey) = app_handle.state::<LastHotkey>().inner().lock() {
@@ -311,7 +306,7 @@ async fn register_hotkeys(
                                     .duration_since(std::time::UNIX_EPOCH)
                                     .map(|d| d.as_millis())
                                     .unwrap_or(0);
-                                DebugLogger::log_info(&format!("HOTKEY_DEBOUNCE: action={}, state={:?}, suppress={}, ts_ms={}, last_elapsed={}ms", action_clone, ev.state, suppress, ts_ms, when.elapsed().as_millis()));
+                                DebugLogger::log_info(&format!("HOTKEY_DEBOUNCE: action={}, state={:?}, ts_ms={}, last_elapsed={}ms", action_clone, ev.state, ts_ms, when.elapsed().as_millis()));
                                 return;
                             }
                         }
@@ -323,29 +318,15 @@ async fn register_hotkeys(
                         .duration_since(std::time::UNIX_EPOCH)
                         .map(|d| d.as_millis())
                         .unwrap_or(0);
-                    DebugLogger::log_info(&format!("HOTKEY_TRIGGER: action={}, state={:?}, suppress={}, ts_ms={}", action_clone, ev.state, suppress, ts_ms));
+                    DebugLogger::log_info(&format!("HOTKEY_TRIGGER: action={}, state={:?}, ts_ms={}", action_clone, ev.state, ts_ms));
 
                     // Normalize action names to support both camelCase and snake_case
                     let normalized = match action_clone.as_str() {
-                        "pushToTalk" | "push_to_talk" => "push_to_talk",
                         "handsFree" | "hands_free" => "hands_free",
                         other => other,
                     };
 
-                    // If an insertion is in progress, ignore start/toggle events entirely
-                    if suppress {
-                        DebugLogger::log_info("Hotkey event suppressed due to text insertion in progress");
-                        return;
-                    }
-
                     match (normalized, ev.state) {
-                        // Push-to-talk: Pressed = start, Released = stop
-                        ("push_to_talk", ShortcutState::Pressed) => {
-                            let _ = app_for_emit.emit("start-recording-from-hotkey", ());
-                        }
-                        ("push_to_talk", ShortcutState::Released) => {
-                            let _ = app_for_emit.emit("stop-recording-from-hotkey", ());
-                        }
                         // Hands-free: Pressed = toggle (ignore release)
                         ("hands_free", ShortcutState::Pressed) => {
                             let _ = app_for_emit.emit("toggle-recording-from-hotkey", ());
@@ -432,7 +413,6 @@ async fn start_recording(
         stt_model,
         translation_model: translation_model.clone(),
         hotkeys: crate::settings::Hotkeys {
-            push_to_talk: "".to_string(), // Not used in recording
             hands_free: "".to_string(), // Not used in recording
         },
         auto_mute,
@@ -521,25 +501,18 @@ async fn start_recording(
     let (text_insertion_tx, mut text_insertion_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
     // Control channel for the worker to notify when insertion starts/ends
     let (insertion_ctrl_tx, mut _insertion_ctrl_rx) = tokio::sync::mpsc::unbounded_channel::<bool>();
-    // Use the managed insertion suppression so register_hotkeys can observe it
-    let insertion_suppression = app.state::<InsertionSuppression>().inner().clone();
 
     // Spawn a dedicated background task that performs the blocking insertions
     // using spawn_blocking so it doesn't block the Tokio runtime.
     let text_insertion_service_for_worker = text_insertion_service.clone();
     let insertion_ctrl_tx_for_worker = insertion_ctrl_tx.clone();
-    let insertion_suppression_for_worker = insertion_suppression.clone();
     tokio::spawn(async move {
         DebugLogger::log_info("TEXT_INSERTION_WORKER: started");
         while let Some(text) = text_insertion_rx.recv().await {
             DebugLogger::log_info(&format!("TEXT_INSERTION_WORKER: received text (len={}) to insert", text.len()));
             // Signal insertion start
             let _ = insertion_ctrl_tx_for_worker.send(true);
-            // Also set the suppression flag for consumers that check it directly
-            {
-                let mut s = insertion_suppression_for_worker.lock().unwrap();
-                *s = true;
-            }
+            
             let svc = text_insertion_service_for_worker.clone();
             let t = text.clone();
             // Run the platform Command in a blocking thread pool
@@ -551,10 +524,6 @@ async fn start_recording(
             }
             // Signal insertion complete
             let _ = insertion_ctrl_tx_for_worker.send(false);
-            {
-                let mut s = insertion_suppression_for_worker.lock().unwrap();
-                *s = false;
-            }
         }
         DebugLogger::log_info("TEXT_INSERTION_WORKER: exiting (sender closed)");
     });
@@ -1098,16 +1067,9 @@ fn stop_recording(
     DebugLogger::log_info("STOP_RECORDING_CALLED: Analyzing call source...");
     
     // Check if this is a legitimate user-initiated stop vs automatic/unexpected stop
-    let user_initiated = if let Ok(suppress) = app.state::<InsertionSuppression>().inner().lock() {
-        !*suppress  // If not suppressed, it's likely user initiated
-    } else {
-        true
-    };
+    let user_initiated = true; // Always treat as user-initiated since we removed suppression mechanism
     
     DebugLogger::log_info(&format!("STOP_RECORDING_CALLED: user_initiated={}", user_initiated));
-    
-    // In simplified mode, always allow user to stop recording
-    // Removed text insertion suppression check for better user control
     
     // If we're not currently recording, ignore duplicate stop requests.
     // Also implement a short cooldown so rapid repeated Stop commands are dropped.
@@ -1266,11 +1228,6 @@ async fn validate_settings(settings: serde_json::Value) -> Result<serde_json::Va
 
     // Validate hotkeys
     if let Some(hotkeys) = settings["hotkeys"].as_object() {
-        if let Some(push_to_talk) = hotkeys.get("pushToTalk").and_then(|v| v.as_str()) {
-            if push_to_talk.is_empty() {
-                errors.push("Push to talk hotkey cannot be empty".to_string());
-            }
-        }
         if let Some(hands_free) = hotkeys.get("handsFree").and_then(|v| v.as_str()) {
             if hands_free.is_empty() {
                 errors.push("Hands-free hotkey cannot be empty".to_string());
@@ -1535,13 +1492,12 @@ async fn save_settings_from_frontend(
     auto_mute: bool,
     translation_enabled: bool,
     debug_logging: bool,
-    push_to_talk_hotkey: String,
     hands_free_hotkey: String,
     text_insertion_enabled: bool
 ) -> Result<(), String> {
     // Log the settings being saved (without logging the API key for security)
-    DebugLogger::log_info(&format!("SETTINGS_SAVE: spoken_language={}, translation_language={}, audio_device={}, theme={}, api_endpoint={}, stt_model={}, translation_model={}, api_key_provided={}, auto_mute={}, translation_enabled={}, debug_logging={}, push_to_talk={}, hands_free={}, text_insertion_enabled={}", 
-        spoken_language, translation_language, audio_device, theme, api_endpoint, stt_model, translation_model, !api_key.is_empty(), auto_mute, translation_enabled, debug_logging, push_to_talk_hotkey, hands_free_hotkey, text_insertion_enabled));
+    DebugLogger::log_info(&format!("SETTINGS_SAVE: spoken_language={}, translation_language={}, audio_device={}, theme={}, api_endpoint={}, stt_model={}, translation_model={}, api_key_provided={}, auto_mute={}, translation_enabled={}, debug_logging={}, hands_free={}, text_insertion_enabled={}", 
+        spoken_language, translation_language, audio_device, theme, api_endpoint, stt_model, translation_model, !api_key.is_empty(), auto_mute, translation_enabled, debug_logging, hands_free_hotkey, text_insertion_enabled));
 
     // Store API key securely if provided and not empty
     // (Note: we now send empty string for security, so API key is stored separately via store_api_key command)
@@ -1705,8 +1661,6 @@ pub fn run() {
             // Create a simple system tray menu without problematic dynamic submenus
             let tray_menu = {
                 let show_hide = MenuItemBuilder::with_id("show_hide", "Show/Hide TalkToMe").build(app)?;
-                let start_recording = MenuItemBuilder::with_id("start_recording", "Start Recording").build(app)?;
-                let stop_recording = MenuItemBuilder::with_id("stop_recording", "Stop Recording").enabled(false).build(app)?;
                 
                 let preferences = MenuItemBuilder::with_id("preferences", "Preferences").build(app)?;
                 let api_settings = MenuItemBuilder::with_id("api_settings", "API Settings").build(app)?;
@@ -1718,8 +1672,6 @@ pub fn run() {
                 MenuBuilder::new(app)
                     .items(&[
                         &show_hide,
-                        &start_recording,
-                        &stop_recording,
                         &preferences,
                         &api_settings,
                         &language_settings, 
@@ -1741,18 +1693,6 @@ pub fn run() {
                         "show_hide" => {
                             if let Err(e) = toggle_window(app.clone()) {
                                 eprintln!("Failed to toggle window: {}", e);
-                            }
-                        }
-                        "start_recording" => {
-                            // Emit event to frontend to start recording
-                            if let Some(window) = app.get_webview_window("main") {
-                                let _ = window.emit("tray-start-recording", ());
-                            }
-                        }
-                        "stop_recording" => {
-                            // Emit event to frontend to stop recording
-                            if let Some(window) = app.get_webview_window("main") {
-                                let _ = window.emit("tray-stop-recording", ());
                             }
                         }
                         "preferences" => {

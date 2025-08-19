@@ -7,8 +7,7 @@
   let currentSettings = {
     theme: "auto",
     hotkeys: {
-      pushToTalk: "Ctrl+Win",
-      handsFree: "Ctrl+Win+Space",
+      handsFree: "Ctrl+Shift+Space",
     },
     autoMute: true,
     debugLogging: false,
@@ -84,15 +83,21 @@
     }
 
     console.log("Final theme to apply:", finalTheme);
-    console.log("Document element before:", document.documentElement.classList.toString());
+    console.log(
+      "Document element before:",
+      document.documentElement.classList.toString()
+    );
 
     if (finalTheme === "dark") {
       document.documentElement.classList.add("dark");
     } else {
       document.documentElement.classList.remove("dark");
     }
-    
-    console.log("Document element after:", document.documentElement.classList.toString());
+
+    console.log(
+      "Document element after:",
+      document.documentElement.classList.toString()
+    );
     localStorage.setItem("theme", finalTheme);
     console.log("Saved to localStorage:", finalTheme);
   }
@@ -173,7 +178,7 @@
         "OSRight",
       ].includes(code)
     ) {
-      // This is just a modifier key - for modifier-only combinations like Ctrl+Win or Shift+Ctrl+Alt
+      // This is just a modifier key - for modifier-only combinations like Ctrl+Shift+Space or Shift+Ctrl+Alt
       if (parts.length >= 2) {
         // We have multiple modifiers, this could be a valid modifier-only combination
         return parts.join("+");
@@ -323,10 +328,7 @@
     return parts.join("+");
   }
 
-  function handleHotkeyInputKeydown(
-    field: "pushToTalk" | "handsFree",
-    e: KeyboardEvent
-  ) {
+  function handleHotkeyInputKeydown(field: "handsFree", e: KeyboardEvent) {
     e.preventDefault();
     e.stopPropagation();
 
@@ -348,16 +350,6 @@
       ...currentSettings,
       hotkeys: { ...currentSettings.hotkeys, [field]: combo },
     };
-
-    // Validate that hotkeys are different
-    const differentError = validateHotkeysAreDifferent(
-      newSettings.hotkeys.pushToTalk,
-      newSettings.hotkeys.handsFree
-    );
-    if (differentError) {
-      hotkeyError = differentError;
-      return;
-    }
 
     // Clear any previous errors and update settings
     hotkeyError = null;
@@ -404,30 +396,10 @@ Formatted: ${formatHotkeyFromEvent(e)}
     return null;
   }
 
-  // Validate that hotkeys are different
-  function validateHotkeysAreDifferent(
-    pushToTalk: string,
-    handsFree: string
-  ): string | null {
-    if (pushToTalk === handsFree && pushToTalk.trim() !== "") {
-      return "Push to Talk and Hands-free Toggle hotkeys must be different!";
-    }
-    return null;
-  }
-
   // Comprehensive hotkey validation
   function validateAllHotkeys(settings: typeof currentSettings): string | null {
-    const pushToTalkError = validateHotkey(settings.hotkeys.pushToTalk);
-    if (pushToTalkError) return `Push to Talk: ${pushToTalkError}`;
-
     const handsFreeError = validateHotkey(settings.hotkeys.handsFree);
     if (handsFreeError) return `Hands-free Toggle: ${handsFreeError}`;
-
-    const sameHotkeyError = validateHotkeysAreDifferent(
-      settings.hotkeys.pushToTalk,
-      settings.hotkeys.handsFree
-    );
-    if (sameHotkeyError) return sameHotkeyError;
 
     return null;
   }
@@ -452,8 +424,8 @@ Formatted: ${formatHotkeyFromEvent(e)}
 
       // Update hotkeys in the backend
       if (currentSettings.hotkeys) {
-        const { pushToTalk, handsFree } = currentSettings.hotkeys;
-        settings.updateHotkeys({ pushToTalk, handsFree });
+        const { handsFree } = currentSettings.hotkeys;
+        settings.updateHotkeys({ handsFree });
       }
 
       // Visual feedback
@@ -473,8 +445,7 @@ Formatted: ${formatHotkeyFromEvent(e)}
     currentSettings = {
       theme: "auto",
       hotkeys: {
-        pushToTalk: "Ctrl+Win",
-        handsFree: "Ctrl+Win+Space",
+        handsFree: "Ctrl+Shift+Space",
       },
       autoMute: true,
       debugLogging: false,
@@ -483,7 +454,6 @@ Formatted: ${formatHotkeyFromEvent(e)}
     persistSettings(currentSettings);
     // Update hotkeys in the backend
     settings.updateHotkeys({
-      pushToTalk: currentSettings.hotkeys.pushToTalk,
       handsFree: currentSettings.hotkeys.handsFree,
     });
     // brief success feedback on reset
@@ -537,45 +507,6 @@ Formatted: ${formatHotkeyFromEvent(e)}
       <div class="space-y-4">
         <div>
           <label
-            for="hotkeyPushToTalk"
-            class="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2"
-          >
-            Push to Talk Hotkey
-          </label>
-          <p class="text-xs text-gray-500 dark:text-gray-400 mb-2">
-            Press any key combination to capture it. Hold and release to
-            register the hotkey.
-          </p>
-          <div class="flex gap-2">
-            <input
-              type="text"
-              id="hotkeyPushToTalk"
-              bind:value={currentSettings.hotkeys.pushToTalk}
-              placeholder="Press keys to set hotkey..."
-              class="flex-1 px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-md shadow-sm focus:outline-none focus:ring-blue-500 focus:border-blue-500 dark:bg-gray-700 dark:text-white"
-              on:keydown={(e) => handleHotkeyInputKeydown("pushToTalk", e)}
-              on:focus={(e) => (e.target as HTMLInputElement).select()}
-            />
-            <button
-              type="button"
-              class="px-3 py-2 text-xs bg-blue-100 dark:bg-blue-800 text-blue-800 dark:text-blue-200 rounded hover:bg-blue-200 dark:hover:bg-blue-700"
-              on:click={() => (currentSettings.hotkeys.pushToTalk = "Ctrl+Win")}
-            >
-              Ctrl+Win
-            </button>
-            <button
-              type="button"
-              class="px-3 py-2 text-xs bg-blue-100 dark:bg-blue-800 text-blue-800 dark:text-blue-200 rounded hover:bg-blue-200 dark:hover:bg-blue-700"
-              on:click={() =>
-                (currentSettings.hotkeys.pushToTalk = "Shift+Ctrl+Alt")}
-            >
-              Shift+Ctrl+Alt
-            </button>
-          </div>
-        </div>
-
-        <div>
-          <label
             for="hotkeyHandsFree"
             class="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2"
           >
@@ -599,9 +530,9 @@ Formatted: ${formatHotkeyFromEvent(e)}
               type="button"
               class="px-3 py-2 text-xs bg-blue-100 dark:bg-blue-800 text-blue-800 dark:text-blue-200 rounded hover:bg-blue-200 dark:hover:bg-blue-700"
               on:click={() =>
-                (currentSettings.hotkeys.handsFree = "Ctrl+Win+Space")}
+                (currentSettings.hotkeys.handsFree = "Ctrl+Shift+Space")}
             >
-              Ctrl+Win+Space
+              Ctrl+Shift+Space
             </button>
             <button
               type="button"
@@ -673,25 +604,6 @@ Formatted: ${formatHotkeyFromEvent(e)}
         <div class="flex items-center">
           <input
             type="checkbox"
-            id="debugLogging"
-            bind:checked={currentSettings.debugLogging}
-            on:change={handleDebugLoggingChange}
-            class="h-4 w-4 text-blue-600 focus:ring-blue-500 border-gray-300 rounded"
-          />
-          <label
-            for="debugLogging"
-            class="ml-2 block text-sm text-gray-700 dark:text-gray-300"
-          >
-            Enable debug logging to file
-          </label>
-        </div>
-        <p class="ml-6 text-xs text-gray-500 dark:text-gray-400">
-          Save detailed debug information to log file for troubleshooting
-        </p>
-
-        <div class="flex items-center">
-          <input
-            type="checkbox"
             id="textInsertion"
             bind:checked={currentSettings.textInsertionEnabled}
             on:change={handleTextInsertionChange}
@@ -708,30 +620,6 @@ Formatted: ${formatHotkeyFromEvent(e)}
           Automatically paste transcribed/translated text into the focused
           application using clipboard
         </p>
-
-        <!-- Test Text Insertion Button -->
-        {#if currentSettings.textInsertionEnabled}
-          <div class="ml-6 mt-2">
-            <button
-              type="button"
-              on:click={async () => {
-                try {
-                  await invoke("test_text_insertion", { testText: "Hello, this is a test of automatic text insertion!" });
-                  console.log("Text insertion test completed successfully");
-                } catch (error) {
-                  console.error("Text insertion test failed:", error);
-                  alert("Text insertion test failed: " + error);
-                }
-              }}
-              class="px-3 py-1 text-xs bg-blue-100 dark:bg-blue-800 text-blue-800 dark:text-blue-200 rounded hover:bg-blue-200 dark:hover:bg-blue-700 transition-colors"
-            >
-              Test Text Insertion
-            </button>
-            <p class="text-xs text-gray-500 dark:text-gray-400 mt-1">
-              Click to test if text insertion is working. Focus a text editor or input field first.
-            </p>
-          </div>
-        {/if}
 
         <div class="flex items-center mt-4">
           <label
@@ -753,6 +641,25 @@ Formatted: ${formatHotkeyFromEvent(e)}
         <p class="ml-6 text-xs text-gray-500 dark:text-gray-400">
           Recording will automatically stop after this time limit for safety
           (1-60 minutes)
+        </p>
+
+        <div class="flex items-center">
+          <input
+            type="checkbox"
+            id="debugLogging"
+            bind:checked={currentSettings.debugLogging}
+            on:change={handleDebugLoggingChange}
+            class="h-4 w-4 text-blue-600 focus:ring-blue-500 border-gray-300 rounded"
+          />
+          <label
+            for="debugLogging"
+            class="ml-2 block text-sm text-gray-700 dark:text-gray-300"
+          >
+            Enable debug logging to file
+          </label>
+        </div>
+        <p class="ml-6 text-xs text-gray-500 dark:text-gray-400">
+          Save detailed debug information to log file for troubleshooting
         </p>
 
         <!-- Debug logging info -->

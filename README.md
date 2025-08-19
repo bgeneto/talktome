@@ -122,8 +122,7 @@ npm run tauri build
    - Configure VAD parameters
 
 4. **Hotkeys**:
-   - Push-to-talk: Default `Ctrl+Win`
-   - Hands-free recording: Default `Ctrl+Win+Space`
+   - Hands-free recording: Default `Ctrl+Shift+Space`
 
 ### VAD (Voice Activity Detection) Tuning
 
@@ -155,7 +154,6 @@ vad: {
 ### System Tray
 
 The application runs in the system tray with these options:
-- Start/Stop Recording
 - Show Main Window
 - Preferences
 - API Settings
@@ -166,9 +164,7 @@ The application runs in the system tray with these options:
 
 ### Hotkeys
 
-- **Push-to-Talk**: Hold to record, release to stop
 - **Hands-Free**: Toggle recording on/off
-- **Emergency Stop**: Immediately stop all recording
 
 ## 🔧 Advanced Configuration
 

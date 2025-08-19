@@ -11,7 +11,6 @@ interface Settings {
   sttModel: string;
   translationModel: string;
   hotkeys: {
-    pushToTalk: string;
     handsFree: string;
   };
   autoMute: boolean;
@@ -40,8 +39,7 @@ const defaultSettings: Settings = {
   sttModel: "whisper-large-v3",
   translationModel: "gpt-3.5-turbo",
   hotkeys: {
-    pushToTalk: "Ctrl+Win",
-    handsFree: "Ctrl+Win+Space",
+    handsFree: "Ctrl+Shift+Space",
   },
   autoMute: true,
   debugLogging: false,
@@ -66,10 +64,7 @@ function createSettingsStore() {
     const storedSettings = localStorage.getItem("talktome-settings");
     if (storedSettings) {
       const parsed = JSON.parse(storedSettings);
-      // Deep merge and sanitize legacy keys (remove emergencyStop)
       const mergedHotkeys = {
-        pushToTalk:
-          parsed?.hotkeys?.pushToTalk ?? defaultSettings.hotkeys.pushToTalk,
         handsFree:
           parsed?.hotkeys?.handsFree ?? defaultSettings.hotkeys.handsFree,
       };
@@ -157,7 +152,6 @@ function createSettingsStore() {
         auto_mute: currentSettings.autoMute,
         translation_enabled: currentSettings.translationLanguage !== "none",
         debug_logging: currentSettings.debugLogging,
-        push_to_talk_hotkey: currentSettings.hotkeys.pushToTalk,
         hands_free_hotkey: currentSettings.hotkeys.handsFree,
         text_insertion_enabled: currentSettings.textInsertionEnabled,
         audio_chunking_enabled: false, // FORCE: Always send false to backend for reliability
@@ -429,7 +423,6 @@ function createSettingsStore() {
       });
     },
     updateHotkeys: async (hotkeys: {
-      pushToTalk: string;
       handsFree: string;
     }) => {
       update((settings) => {

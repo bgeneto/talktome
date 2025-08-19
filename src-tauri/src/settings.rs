@@ -29,7 +29,6 @@ pub struct AppSettings {
 
 #[derive(Serialize, Deserialize, Clone)]
 pub struct Hotkeys {
-    pub push_to_talk: String,
     pub hands_free: String,
 }
 
@@ -45,8 +44,7 @@ impl Default for AppSettings {
             stt_model: "whisper-large-v3".to_string(),
             translation_model: "gpt-3.5-turbo".to_string(),
             hotkeys: Hotkeys {
-                push_to_talk: "Ctrl+Win".to_string(),
-                hands_free: "Ctrl+Win+Space".to_string(),
+                hands_free: "Ctrl+Shift+Space".to_string(),
             },
             auto_mute: true,
             translation_enabled: false,
