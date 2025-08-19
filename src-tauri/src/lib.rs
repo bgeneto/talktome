@@ -1540,8 +1540,6 @@ async fn show_recording_timeout_notification(app: AppHandle, max_time_minutes: u
     Ok(())
 }
 
-// Legacy migration commands removed
-
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
