@@ -43,17 +43,6 @@ impl DebugLogger {
         // Always try to create the log path and write a test file for debugging
         println!("DEBUG: Force-testing file creation regardless of debug_enabled state");
 
-        // Simple absolute test - ALWAYS try this
-        let simple_test_path = std::path::Path::new("C:\\temp\\force_test.log");
-        let test_msg = format!(
-            "Force test at {}\n",
-            chrono::Utc::now().format("%Y-%m-%d %H:%M:%S%.3f UTC")
-        );
-        match std::fs::write(simple_test_path, test_msg) {
-            Ok(_) => println!("DEBUG: FORCE TEST SUCCESS - wrote to C:\\temp\\force_test.log"),
-            Err(e) => println!("DEBUG: FORCE TEST FAILED - Error: {}", e),
-        }
-
         // Only write initial messages if enabled
         if debug_enabled {
             println!("DEBUG: About to write initial log messages");
@@ -92,7 +81,7 @@ impl DebugLogger {
         if !Self::is_debug_enabled() {
             return None;
         }
-        
+
         // Determine base logs directory from current log path
         let log_path = if let Ok(path) = LOG_PATH.lock() {
             if let Some(ref path) = *path {

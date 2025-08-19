@@ -296,72 +296,46 @@
 
   async function startRecording() {
     console.log("startRecording() called, current isRecording:", isRecording);
-    // Try to start recording with Rust backend services first
+    
+    // Show countdown overlay immediately (non-blocking)
     try {
-      // Get current settings from localStorage
-      const currentSettings = get(settings);
-
-      try {
-        await invoke("frontend_log", {
-          tag: "start_recording_attempt",
-          payload: { ts: Date.now() },
-        });
-      } catch (e) {
-        console.warn("frontend_log failed:", e);
-      }
-      await invoke("start_recording", {
-        spokenLanguage: currentSettings.spokenLanguage,
-        translationLanguage: currentSettings.translationLanguage,
-        apiEndpoint: currentSettings.apiEndpoint,
-        sttModel: currentSettings.sttModel,
-        autoMute: currentSettings.autoMute,
-        translationEnabled: currentSettings.translationLanguage !== "none",
-        translationModel: currentSettings.translationModel,
-        textInsertionEnabled: currentSettings.textInsertionEnabled,
-        audioChunkingEnabled: currentSettings.audioChunkingEnabled,
-        maxRecordingTimeMinutes: currentSettings.maxRecordingTimeMinutes,
-        debugLogging: currentSettings.debugLogging,
+      invoke("show_countdown_overlay").catch(error => {
+        console.warn("Failed to show countdown overlay:", error);
       });
-      isRecording = true;
-      console.log("Recording started successfully, isRecording:", isRecording);
-      isListening = true;
-      // Only clear previous session text if the previous session ended
-      if (sessionEnded) {
-        originalChunks = [];
-        translatedChunks = [];
-        syncDisplays();
-        sessionEnded = false;
-      }
-      useWebSpeechAPI = false;
-      showTrayNotification("Recording started");
     } catch (error) {
-      console.error("Failed to start recording with Rust backend:", error);
-      // Fallback to Web Speech API
-      const recognition = initWebSpeechAPI();
-      if (!recognition) {
-        alert("Speech recognition not supported in this browser");
-        return;
-      }
-
+      console.warn("Failed to invoke countdown overlay:", error);
+    }
+    
+    // Start a timer for the actual recording after countdown
+    setTimeout(async () => {
+      // Try to start recording with Rust backend services
       try {
-        // Get microphone access for audio level monitoring
-        microphoneStream = await navigator.mediaDevices.getUserMedia({
-          audio: true,
+        // Get current settings from localStorage
+        const currentSettings = get(settings);
+
+        try {
+          await invoke("frontend_log", {
+            tag: "start_recording_attempt",
+            payload: { ts: Date.now() },
+          });
+        } catch (e) {
+          console.warn("frontend_log failed:", e);
+        }
+        await invoke("start_recording", {
+          spokenLanguage: currentSettings.spokenLanguage,
+          translationLanguage: currentSettings.translationLanguage,
+          apiEndpoint: currentSettings.apiEndpoint,
+          sttModel: currentSettings.sttModel,
+          autoMute: currentSettings.autoMute,
+          translationEnabled: currentSettings.translationLanguage !== "none",
+          translationModel: currentSettings.translationModel,
+          textInsertionEnabled: currentSettings.textInsertionEnabled,
+          audioChunkingEnabled: currentSettings.audioChunkingEnabled,
+          maxRecordingTimeMinutes: currentSettings.maxRecordingTimeMinutes,
+          debugLogging: currentSettings.debugLogging,
         });
-
-        // Set up audio context for level monitoring
-        audioContext = new ((window as any).AudioContext ||
-          (window as any).webkitAudioContext)();
-        const ctx = audioContext!;
-        const source = ctx.createMediaStreamSource(microphoneStream);
-        analyzer = ctx.createAnalyser();
-        analyzer.fftSize = 256;
-        source.connect(analyzer);
-
-        // Start audio level monitoring
-        monitorAudioLevel();
-
         isRecording = true;
+        console.log("Recording started successfully, isRecording:", isRecording);
         isListening = true;
         // Only clear previous session text if the previous session ended
         if (sessionEnded) {
@@ -370,16 +344,55 @@
           syncDisplays();
           sessionEnded = false;
         }
-        useWebSpeechAPI = true;
-        recognition.start();
+        useWebSpeechAPI = false;
         showTrayNotification("Recording started");
       } catch (error) {
-        console.error("Microphone access denied:", error);
-        alert(
-          "Microphone access is required for voice recording. Please allow microphone access and try again."
-        );
+        console.error("Failed to start recording with Rust backend:", error);
+        // Fallback to Web Speech API
+        const recognition = initWebSpeechAPI();
+        if (!recognition) {
+          alert("Speech recognition not supported in this browser");
+          return;
+        }
+
+        try {
+          // Get microphone access for audio level monitoring
+          microphoneStream = await navigator.mediaDevices.getUserMedia({
+            audio: true,
+          });
+
+          // Set up audio context for level monitoring
+          audioContext = new ((window as any).AudioContext ||
+            (window as any).webkitAudioContext)();
+          const ctx = audioContext!;
+          const source = ctx.createMediaStreamSource(microphoneStream);
+          analyzer = ctx.createAnalyser();
+          analyzer.fftSize = 256;
+          source.connect(analyzer);
+
+          // Start audio level monitoring
+          monitorAudioLevel();
+
+          isRecording = true;
+          isListening = true;
+          // Only clear previous session text if the previous session ended
+          if (sessionEnded) {
+            originalChunks = [];
+            translatedChunks = [];
+            syncDisplays();
+            sessionEnded = false;
+          }
+          useWebSpeechAPI = true;
+          recognition.start();
+          showTrayNotification("Recording started");
+        } catch (error) {
+          console.error("Microphone access denied:", error);
+          alert(
+            "Microphone access is required for voice recording. Please allow microphone access and try again."
+          );
+        }
       }
-    }
+    }, 3000); // Start recording after 3 second countdown
   }
 
   function monitorAudioLevel() {
@@ -406,6 +419,16 @@
 
   async function stopRecording() {
     console.log("stopRecording() called - call stack:", new Error().stack);
+    
+    // Show recording stopped overlay immediately (non-blocking)
+    try {
+      invoke("show_recording_stopped_overlay").catch(error => {
+        console.warn("Failed to show recording stopped overlay:", error);
+      });
+    } catch (error) {
+      console.warn("Failed to invoke recording stopped overlay:", error);
+    }
+    
     if (useWebSpeechAPI) {
       isRecording = false;
       isListening = false;

@@ -357,6 +357,177 @@ async fn register_hotkeys(
     Ok(())
 }
 
+// Command to show countdown overlay
+#[tauri::command]
+async fn show_countdown_overlay(app: AppHandle) -> Result<(), String> {
+    use tauri::{WebviewWindowBuilder, WebviewUrl};
+    
+    // Close any existing countdown overlay
+    if let Some(existing_window) = app.get_webview_window("countdown_overlay") {
+        let _ = existing_window.close();
+    }
+    
+    // Get screen dimensions
+    let monitors = app.primary_monitor().map_err(|e| e.to_string())?;
+    if let Some(monitor) = monitors {
+        let size = monitor.size();
+        let scale_factor = monitor.scale_factor();
+        
+        // Calculate center position for overlay
+        let overlay_width = 240.0;
+        let overlay_height = 120.0;
+        let x = (size.width as f64 / scale_factor - overlay_width) / 2.0;
+        let y = (size.height as f64 / scale_factor - overlay_height) / 2.0;
+        
+        // Create countdown overlay window
+        let overlay_window = WebviewWindowBuilder::new(
+            &app,
+            "countdown_overlay",
+            WebviewUrl::App("countdown.html".into())
+        )
+        .title("Recording Countdown")
+        .inner_size(240.0, 120.0)
+        .position(x, y)
+        .resizable(false)
+        .decorations(false)
+        .always_on_top(true)
+        .skip_taskbar(true)
+        .transparent(true)
+        .focused(true)
+        .visible_on_all_workspaces(true)
+        .build()
+        .map_err(|e| e.to_string())?;
+        
+        // Auto-close the overlay after 3.5 seconds (countdown + fade out)
+        let overlay_handle = overlay_window.clone();
+        tauri::async_runtime::spawn(async move {
+            tokio::time::sleep(tokio::time::Duration::from_millis(3500)).await;
+            let _ = overlay_handle.close();
+        });
+        
+        Ok(())
+    } else {
+        Err("No monitor found".to_string())
+    }
+}
+
+// Command to show recording stopped overlay
+#[tauri::command]
+async fn show_recording_stopped_overlay(app: AppHandle) -> Result<(), String> {
+    use tauri::{WebviewWindowBuilder, WebviewUrl};
+    
+    // Close any existing overlays
+    if let Some(existing_window) = app.get_webview_window("countdown_overlay") {
+        let _ = existing_window.close();
+    }
+    if let Some(existing_window) = app.get_webview_window("recording_stopped_overlay") {
+        let _ = existing_window.close();
+    }
+    
+    // Get screen dimensions
+    let monitors = app.primary_monitor().map_err(|e| e.to_string())?;
+    if let Some(monitor) = monitors {
+        let size = monitor.size();
+        let scale_factor = monitor.scale_factor();
+        
+        // Calculate center position for overlay
+        let overlay_width = 240.0;
+        let overlay_height = 120.0;
+        let x = (size.width as f64 / scale_factor - overlay_width) / 2.0;
+        let y = (size.height as f64 / scale_factor - overlay_height) / 2.0;
+        
+        // Create recording stopped overlay window
+        let overlay_window = WebviewWindowBuilder::new(
+            &app,
+            "recording_stopped_overlay",
+            WebviewUrl::App("recording-stopped.html".into())
+        )
+        .title("Recording Stopped")
+        .inner_size(240.0, 120.0)
+        .position(x, y)
+        .resizable(false)
+        .decorations(false)
+        .always_on_top(true)
+        .skip_taskbar(true)
+        .transparent(true)
+        .focused(true)
+        .visible_on_all_workspaces(true)
+        .build()
+        .map_err(|e| e.to_string())?;
+        
+        // Auto-close the overlay after 2 seconds
+        let overlay_handle = overlay_window.clone();
+        tauri::async_runtime::spawn(async move {
+            tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
+            let _ = overlay_handle.close();
+        });
+        
+        Ok(())
+    } else {
+        Err("No monitor found".to_string())
+    }
+}
+
+// Command to show instant recording started overlay (without countdown)
+#[tauri::command]
+async fn show_instant_recording_overlay(app: AppHandle) -> Result<(), String> {
+    use tauri::{WebviewWindowBuilder, WebviewUrl};
+    
+    // Close any existing overlays
+    if let Some(existing_window) = app.get_webview_window("countdown_overlay") {
+        let _ = existing_window.close();
+    }
+    if let Some(existing_window) = app.get_webview_window("recording_stopped_overlay") {
+        let _ = existing_window.close();
+    }
+    if let Some(existing_window) = app.get_webview_window("instant_recording_overlay") {
+        let _ = existing_window.close();
+    }
+    
+    // Get screen dimensions
+    let monitors = app.primary_monitor().map_err(|e| e.to_string())?;
+    if let Some(monitor) = monitors {
+        let size = monitor.size();
+        let scale_factor = monitor.scale_factor();
+        
+        // Calculate center position for overlay
+        let overlay_width = 240.0;
+        let overlay_height = 120.0;
+        let x = (size.width as f64 / scale_factor - overlay_width) / 2.0;
+        let y = (size.height as f64 / scale_factor - overlay_height) / 2.0;
+        
+        // Create instant recording overlay window
+        let overlay_window = WebviewWindowBuilder::new(
+            &app,
+            "instant_recording_overlay",
+            WebviewUrl::App("instant-recording.html".into())
+        )
+        .title("Recording Started")
+        .inner_size(240.0, 120.0)
+        .position(x, y)
+        .resizable(false)
+        .decorations(false)
+        .always_on_top(true)
+        .skip_taskbar(true)
+        .transparent(true)
+        .focused(true)
+        .visible_on_all_workspaces(true)
+        .build()
+        .map_err(|e| e.to_string())?;
+        
+        // Auto-close the overlay after 1.5 seconds
+        let overlay_handle = overlay_window.clone();
+        tauri::async_runtime::spawn(async move {
+            tokio::time::sleep(tokio::time::Duration::from_millis(1500)).await;
+            let _ = overlay_handle.close();
+        });
+        
+        Ok(())
+    } else {
+        Err("No monitor found".to_string())
+    }
+}
+
 // Command to start recording
 #[tauri::command]
 async fn start_recording(
@@ -1248,12 +1419,15 @@ fn toggle_window(app: tauri::AppHandle) -> Result<(), String> {
         match window.is_visible() {
             Ok(true) => {
                 let _ = window.hide();
+                let _ = window.set_skip_taskbar(true);
             }
             Ok(false) => {
+                let _ = window.set_skip_taskbar(false);
                 let _ = window.show();
                 let _ = window.set_focus();
             }
             Err(_) => {
+                let _ = window.set_skip_taskbar(false);
                 let _ = window.show();
                 let _ = window.set_focus();
             }
@@ -1647,6 +1821,9 @@ pub fn run() {
             , clear_audio_manager_last_error
             , show_recording_timeout_notification
             , test_hotkey_parsing
+            , show_countdown_overlay
+            , show_recording_stopped_overlay
+            , show_instant_recording_overlay
         ])
         .setup(|app| {
             // Initialize debug logging first (disabled by default, will be enabled by frontend)

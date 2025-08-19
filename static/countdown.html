@@ -1,0 +1,180 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Recording Countdown</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        
+        body {
+            background: transparent;
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            height: 100vh;
+            overflow: hidden;
+        }
+        
+        .countdown-container {
+            background: linear-gradient(135deg, rgba(255, 68, 68, 0.95), rgba(220, 38, 127, 0.95));
+            border-radius: 20px;
+            padding: 24px 32px;
+            text-align: center;
+            box-shadow: 0 20px 40px rgba(0, 0, 0, 0.3), 0 0 0 1px rgba(255, 255, 255, 0.1);
+            backdrop-filter: blur(20px);
+            animation: slideIn 0.4s cubic-bezier(0.175, 0.885, 0.32, 1.275);
+            position: relative;
+            overflow: hidden;
+        }
+        
+        .countdown-container::before {
+            content: '';
+            position: absolute;
+            top: 0;
+            left: 0;
+            right: 0;
+            bottom: 0;
+            background: linear-gradient(135deg, rgba(255, 255, 255, 0.1), rgba(255, 255, 255, 0.05));
+            border-radius: 20px;
+            pointer-events: none;
+        }
+        
+        @keyframes slideIn {
+            from {
+                opacity: 0;
+                transform: scale(0.7) translateY(-30px);
+            }
+            to {
+                opacity: 1;
+                transform: scale(1) translateY(0);
+            }
+        }
+        
+        .countdown-text {
+            color: #ffffff;
+            font-size: 16px;
+            font-weight: 500;
+            margin-bottom: 8px;
+            text-shadow: 0 2px 8px rgba(0, 0, 0, 0.3);
+            position: relative;
+            z-index: 1;
+        }
+        
+        .countdown-number {
+            color: #ffffff;
+            font-size: 64px;
+            font-weight: 700;
+            text-shadow: 0 4px 16px rgba(0, 0, 0, 0.4);
+            animation: countdownPulse 1s infinite;
+            position: relative;
+            z-index: 1;
+            line-height: 1;
+        }
+        
+        @keyframes countdownPulse {
+            0% { transform: scale(1); }
+            50% { transform: scale(1.1); }
+            100% { transform: scale(1); }
+        }
+        
+        .recording-indicator {
+            display: none;
+            color: #ffffff;
+            font-size: 18px;
+            font-weight: 600;
+            text-shadow: 0 2px 8px rgba(0, 0, 0, 0.3);
+            position: relative;
+            z-index: 1;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            gap: 8px;
+        }
+        
+        .mic-icon {
+            font-size: 24px;
+            animation: micBounce 0.6s ease-out;
+        }
+        
+        @keyframes micBounce {
+            0% { transform: scale(0.5) rotate(-10deg); }
+            50% { transform: scale(1.2) rotate(5deg); }
+            100% { transform: scale(1) rotate(0deg); }
+        }
+        
+        .recording-dot {
+            width: 8px;
+            height: 8px;
+            background: #ffffff;
+            border-radius: 50%;
+            animation: dotBlink 1.2s infinite;
+        }
+        
+        @keyframes dotBlink {
+            0%, 50% { opacity: 1; }
+            51%, 100% { opacity: 0.3; }
+        }
+        
+        .fadeOut {
+            animation: fadeOut 0.6s ease-in forwards;
+        }
+        
+        @keyframes fadeOut {
+            to {
+                opacity: 0;
+                transform: scale(0.8) translateY(-20px);
+            }
+        }
+    </style>
+</head>
+<body>
+    <div class="countdown-container" id="countdownContainer">
+        <div class="countdown-text" id="countdownText">Recording will start in</div>
+        <div class="countdown-number" id="countdownNumber">3</div>
+        <div class="recording-indicator" id="recordingIndicator" style="display: none;">
+            <span class="mic-icon">🎤</span>
+            <span>Recording Started</span>
+            <div class="recording-dot"></div>
+        </div>
+    </div>
+
+    <script>
+        let countdownValue = 3;
+        const countdownNumber = document.getElementById('countdownNumber');
+        const countdownText = document.getElementById('countdownText');
+        const recordingIndicator = document.getElementById('recordingIndicator');
+        const container = document.getElementById('countdownContainer');
+        
+        function startCountdown() {
+            const interval = setInterval(() => {
+                countdownValue--;
+                
+                if (countdownValue > 0) {
+                    countdownNumber.textContent = countdownValue;
+                } else if (countdownValue === 0) {
+                    // Show "Recording Started" message
+                    countdownNumber.style.display = 'none';
+                    countdownText.style.display = 'none';
+                    recordingIndicator.style.display = 'flex';
+                    
+                    // Start fade out after showing recording message
+                    setTimeout(() => {
+                        container.classList.add('fadeOut');
+                    }, 800);
+                    
+                    clearInterval(interval);
+                }
+            }, 1000);
+        }
+        
+        // Start countdown when page loads
+        document.addEventListener('DOMContentLoaded', startCountdown);
+    </script>
+</body>
+</html>
