@@ -56,6 +56,7 @@
   let unlistenTranscriptionUpdate: () => void = () => {};
   let unlistenToggleHK: () => void = () => {};
   let unlistenRecordingStopped: () => void = () => {};
+  let unlistenRecordingStarted: () => void = () => {};
   let unlistenRecordingTimeout: () => void = () => {};
 
   // Flag to indicate the previous transcription session ended. We only
@@ -194,18 +195,44 @@
         console.error("Failed to register hotkeys:", error);
       }
 
-      unlistenToggleHK = await listen("toggle-recording-from-hotkey", () => {
-        console.log("toggle-recording-from-hotkey event received, isRecording:", isRecording);
+      unlistenToggleHK = await listen("toggle-recording-from-hotkey", async () => {
+        console.log("toggle-recording-from-hotkey event received, frontend isRecording:", isRecording);
         if (!guard()) {
           console.log("Guard prevented hotkey action due to debounce");
           return;
         }
-        if (isRecording) {
-          console.log("Currently recording, calling stopRecording()");
-          stopRecording();
-        } else {
-          console.log("Not recording, calling startRecording()");
-          startRecording();
+        
+        // Always check backend state before deciding action to avoid race conditions
+        try {
+          const backendRecordingState = await invoke("get_recording_status") as boolean;
+          console.log("Backend recording state:", backendRecordingState, "Frontend state:", isRecording);
+          
+          // Use backend state as authoritative source
+          if (backendRecordingState) {
+            console.log("Backend confirms recording active, calling stopRecording()");
+            stopRecording();
+          } else {
+            console.log("Backend confirms not recording, calling startRecording()");
+            startRecording();
+          }
+          
+          // Sync frontend state with backend state
+          if (isRecording !== backendRecordingState) {
+            console.log("Syncing frontend state from", isRecording, "to", backendRecordingState);
+            isRecording = backendRecordingState;
+            isListening = backendRecordingState;
+            if (!backendRecordingState) audioLevel = 0;
+          }
+        } catch (error) {
+          console.error("Failed to get backend recording status, using frontend state:", error);
+          // Fallback to frontend state if backend query fails
+          if (isRecording) {
+            console.log("Fallback: frontend thinks recording, calling stopRecording()");
+            stopRecording();
+          } else {
+            console.log("Fallback: frontend thinks not recording, calling startRecording()");
+            startRecording();
+          }
         }
       });
 
@@ -271,8 +298,35 @@
 
       // Listen to backend recording-stopped to mark session ended
       unlistenRecordingStopped = await listen("recording-stopped", () => {
+        console.log("Backend recording-stopped event received, syncing frontend state");
+        
+        // Update recording state
+        isRecording = false;
+        isListening = false;
         sessionEnded = true;
+        audioLevel = 0;
+        
+        console.log("Frontend state synced: isRecording=", isRecording, "isListening=", isListening);
         showTrayNotification("Recording stopped");
+      });
+
+      // Listen to backend recording-started to sync frontend state
+      unlistenRecordingStarted = await listen("recording-started", () => {
+        console.log("Backend recording-started event received, syncing frontend state");
+        
+        // Clear previous session if it ended
+        if (sessionEnded) {
+          originalChunks = [];
+          translatedChunks = [];
+          syncDisplays();
+        }
+        
+        // Update recording state
+        isRecording = true;
+        isListening = true;
+        sessionEnded = false;
+        
+        console.log("Frontend state synced: isRecording=", isRecording, "isListening=", isListening);
       });
 
       // Listen for recording timeout events
@@ -290,6 +344,7 @@
       unlistenToggleHK();
       unlistenTranscriptionUpdate();
       unlistenRecordingStopped();
+      unlistenRecordingStarted();
       unlistenRecordingTimeout();
     };
   });
@@ -297,30 +352,24 @@
   async function startRecording() {
     console.log("startRecording() called, current isRecording:", isRecording);
     
-    // Show countdown overlay immediately (non-blocking)
-    try {
-      invoke("show_countdown_overlay").catch(error => {
-        console.warn("Failed to show countdown overlay:", error);
-      });
-    } catch (error) {
-      console.warn("Failed to invoke countdown overlay:", error);
-    }
+    // Immediately update frontend state to prevent race conditions
+    isRecording = true;
+    isListening = true;
+    console.log("Frontend state immediately set to recording=true to prevent race conditions");
     
-    // Start a timer for the actual recording after countdown
-    setTimeout(async () => {
-      // Try to start recording with Rust backend services
-      try {
-        // Get current settings from localStorage
-        const currentSettings = get(settings);
+    // Try to start recording with Rust backend services immediately
+    try {
+      // Get current settings from localStorage
+      const currentSettings = get(settings);
 
-        try {
-          await invoke("frontend_log", {
-            tag: "start_recording_attempt",
-            payload: { ts: Date.now() },
-          });
-        } catch (e) {
-          console.warn("frontend_log failed:", e);
-        }
+      try {
+        await invoke("frontend_log", {
+          tag: "start_recording_attempt",
+          payload: { ts: Date.now() },
+        });
+      } catch (e) {
+        console.warn("frontend_log failed:", e);
+      }
         await invoke("start_recording", {
           spokenLanguage: currentSettings.spokenLanguage,
           translationLanguage: currentSettings.translationLanguage,
@@ -334,9 +383,18 @@
           maxRecordingTimeMinutes: currentSettings.maxRecordingTimeMinutes,
           debugLogging: currentSettings.debugLogging,
         });
-        isRecording = true;
-        console.log("Recording started successfully, isRecording:", isRecording);
-        isListening = true;
+        // State already set to true above, confirm it's still correct
+        console.log("Recording started successfully, isRecording confirmed:", isRecording);
+        
+        // Show recording started notification
+        try {
+          invoke("show_recording_started_notification").catch(error => {
+            console.warn("Failed to show recording started notification:", error);
+          });
+        } catch (error) {
+          console.warn("Failed to invoke recording started notification:", error);
+        }
+        
         // Only clear previous session text if the previous session ended
         if (sessionEnded) {
           originalChunks = [];
@@ -348,6 +406,11 @@
         showTrayNotification("Recording started");
       } catch (error) {
         console.error("Failed to start recording with Rust backend:", error);
+        // Reset state on failure
+        isRecording = false;
+        isListening = false;
+        console.log("Recording start failed, state reset to false");
+        
         // Fallback to Web Speech API
         const recognition = initWebSpeechAPI();
         if (!recognition) {
@@ -387,13 +450,16 @@
           showTrayNotification("Recording started");
         } catch (error) {
           console.error("Microphone access denied:", error);
+          // Reset state on failure
+          isRecording = false;
+          isListening = false;
+          console.log("Microphone access failed, state reset to false");
           alert(
             "Microphone access is required for voice recording. Please allow microphone access and try again."
           );
         }
       }
-    }, 3000); // Start recording after 3 second countdown
-  }
+    }
 
   function monitorAudioLevel() {
     if (!analyzer || !isRecording) return;
@@ -420,13 +486,13 @@
   async function stopRecording() {
     console.log("stopRecording() called - call stack:", new Error().stack);
     
-    // Show recording stopped overlay immediately (non-blocking)
+    // Show recording stopped notification immediately (non-blocking)
     try {
-      invoke("show_recording_stopped_overlay").catch(error => {
-        console.warn("Failed to show recording stopped overlay:", error);
+      invoke("show_recording_stopped_notification").catch(error => {
+        console.warn("Failed to show recording stopped notification:", error);
       });
     } catch (error) {
-      console.warn("Failed to invoke recording stopped overlay:", error);
+      console.warn("Failed to invoke recording stopped notification:", error);
     }
     
     if (useWebSpeechAPI) {

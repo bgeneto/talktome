@@ -40,9 +40,6 @@ impl DebugLogger {
             *enabled = debug_enabled;
         }
 
-        // Always try to create the log path and write a test file for debugging
-        println!("DEBUG: Force-testing file creation regardless of debug_enabled state");
-
         // Only write initial messages if enabled
         if debug_enabled {
             println!("DEBUG: About to write initial log messages");

@@ -4,6 +4,7 @@ use tauri::{
     Manager, Emitter, AppHandle, State,
 };
 use tauri_plugin_global_shortcut::{Code, Modifiers, Shortcut, ShortcutState, GlobalShortcutExt};
+use tauri_plugin_notification::NotificationExt;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 // Global last-audio-manager error for diagnostics (frontend can query this)
@@ -357,175 +358,50 @@ async fn register_hotkeys(
     Ok(())
 }
 
-// Command to show countdown overlay
+// Command to show recording started notification
 #[tauri::command]
-async fn show_countdown_overlay(app: AppHandle) -> Result<(), String> {
-    use tauri::{WebviewWindowBuilder, WebviewUrl};
-    
-    // Close any existing countdown overlay
-    if let Some(existing_window) = app.get_webview_window("countdown_overlay") {
-        let _ = existing_window.close();
+async fn show_recording_started_notification(
+    app: AppHandle,
+    recording_state: State<'_, RecordingState>
+) -> Result<(), String> {
+    // Check if we should actually show notification (prevent showing when already recording)
+    {
+        let state = recording_state.inner().lock().map_err(|e| e.to_string())?;
+        if *state {
+            DebugLogger::log_info("show_recording_started_notification: Already recording, skipping notification display");
+            return Ok(()); // Don't show notification if already recording
+        }
     }
     
-    // Get screen dimensions
-    let monitors = app.primary_monitor().map_err(|e| e.to_string())?;
-    if let Some(monitor) = monitors {
-        let size = monitor.size();
-        let scale_factor = monitor.scale_factor();
-        
-        // Calculate center position for overlay
-        let overlay_width = 240.0;
-        let overlay_height = 120.0;
-        let x = (size.width as f64 / scale_factor - overlay_width) / 2.0;
-        let y = (size.height as f64 / scale_factor - overlay_height) / 2.0;
-        
-        // Create countdown overlay window
-        let overlay_window = WebviewWindowBuilder::new(
-            &app,
-            "countdown_overlay",
-            WebviewUrl::App("countdown.html".into())
-        )
-        .title("Recording Countdown")
-        .inner_size(240.0, 120.0)
-        .position(x, y)
-        .resizable(false)
-        .decorations(false)
-        .always_on_top(true)
-        .skip_taskbar(true)
-        .transparent(true)
-        .focused(true)
-        .visible_on_all_workspaces(true)
-        .build()
-        .map_err(|e| e.to_string())?;
-        
-        // Auto-close the overlay after 3.5 seconds (countdown + fade out)
-        let overlay_handle = overlay_window.clone();
-        tauri::async_runtime::spawn(async move {
-            tokio::time::sleep(tokio::time::Duration::from_millis(3500)).await;
-            let _ = overlay_handle.close();
-        });
-        
-        Ok(())
-    } else {
-        Err("No monitor found".to_string())
-    }
-}
-
-// Command to show recording stopped overlay
-#[tauri::command]
-async fn show_recording_stopped_overlay(app: AppHandle) -> Result<(), String> {
-    use tauri::{WebviewWindowBuilder, WebviewUrl};
+    DebugLogger::log_info("Showing recording started notification");
     
-    // Close any existing overlays
-    if let Some(existing_window) = app.get_webview_window("countdown_overlay") {
-        let _ = existing_window.close();
-    }
-    if let Some(existing_window) = app.get_webview_window("recording_stopped_overlay") {
-        let _ = existing_window.close();
-    }
-    
-    // Get screen dimensions
-    let monitors = app.primary_monitor().map_err(|e| e.to_string())?;
-    if let Some(monitor) = monitors {
-        let size = monitor.size();
-        let scale_factor = monitor.scale_factor();
-        
-        // Calculate center position for overlay
-        let overlay_width = 240.0;
-        let overlay_height = 120.0;
-        let x = (size.width as f64 / scale_factor - overlay_width) / 2.0;
-        let y = (size.height as f64 / scale_factor - overlay_height) / 2.0;
-        
-        // Create recording stopped overlay window
-        let overlay_window = WebviewWindowBuilder::new(
-            &app,
-            "recording_stopped_overlay",
-            WebviewUrl::App("recording-stopped.html".into())
-        )
-        .title("Recording Stopped")
-        .inner_size(240.0, 120.0)
-        .position(x, y)
-        .resizable(false)
-        .decorations(false)
-        .always_on_top(true)
-        .skip_taskbar(true)
-        .transparent(true)
-        .focused(true)
-        .visible_on_all_workspaces(true)
-        .build()
-        .map_err(|e| e.to_string())?;
-        
-        // Auto-close the overlay after 2 seconds
-        let overlay_handle = overlay_window.clone();
-        tauri::async_runtime::spawn(async move {
-            tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
-            let _ = overlay_handle.close();
-        });
-        
-        Ok(())
-    } else {
-        Err("No monitor found".to_string())
-    }
-}
-
-// Command to show instant recording started overlay (without countdown)
-#[tauri::command]
-async fn show_instant_recording_overlay(app: AppHandle) -> Result<(), String> {
-    use tauri::{WebviewWindowBuilder, WebviewUrl};
-    
-    // Close any existing overlays
-    if let Some(existing_window) = app.get_webview_window("countdown_overlay") {
-        let _ = existing_window.close();
-    }
-    if let Some(existing_window) = app.get_webview_window("recording_stopped_overlay") {
-        let _ = existing_window.close();
-    }
-    if let Some(existing_window) = app.get_webview_window("instant_recording_overlay") {
-        let _ = existing_window.close();
-    }
-    
-    // Get screen dimensions
-    let monitors = app.primary_monitor().map_err(|e| e.to_string())?;
-    if let Some(monitor) = monitors {
-        let size = monitor.size();
-        let scale_factor = monitor.scale_factor();
-        
-        // Calculate center position for overlay
-        let overlay_width = 240.0;
-        let overlay_height = 120.0;
-        let x = (size.width as f64 / scale_factor - overlay_width) / 2.0;
-        let y = (size.height as f64 / scale_factor - overlay_height) / 2.0;
-        
-        // Create instant recording overlay window
-        let overlay_window = WebviewWindowBuilder::new(
-            &app,
-            "instant_recording_overlay",
-            WebviewUrl::App("instant-recording.html".into())
-        )
+    app.notification()
+        .builder()
         .title("Recording Started")
-        .inner_size(240.0, 120.0)
-        .position(x, y)
-        .resizable(false)
-        .decorations(false)
-        .always_on_top(true)
-        .skip_taskbar(true)
-        .transparent(true)
-        .focused(true)
-        .visible_on_all_workspaces(true)
-        .build()
+        .body("🎤 Listening for speech...")
+        .show()
         .map_err(|e| e.to_string())?;
         
-        // Auto-close the overlay after 1.5 seconds
-        let overlay_handle = overlay_window.clone();
-        tauri::async_runtime::spawn(async move {
-            tokio::time::sleep(tokio::time::Duration::from_millis(1500)).await;
-            let _ = overlay_handle.close();
-        });
+    Ok(())
+}
+
+// Command to show recording stopped notification
+#[tauri::command]
+async fn show_recording_stopped_notification(
+    app: AppHandle,
+    _recording_state: State<'_, RecordingState>
+) -> Result<(), String> {
+    DebugLogger::log_info("Showing recording stopped notification");
+    
+    app.notification()
+        .builder()
+        .title("Recording Stopped")
+        .body("⏹️ Processing audio...")
+        .icon("icon.png")
+        .show()
+        .map_err(|e| e.to_string())?;
         
-        Ok(())
-    } else {
-        Err("No monitor found".to_string())
-    }
+    Ok(())
 }
 
 // Command to start recording
@@ -552,6 +428,7 @@ async fn start_recording(
     {
         let state = recording_state.inner().lock().map_err(|e| e.to_string())?;
         if *state {
+            DebugLogger::log_info("start_recording called but already recording - rejecting duplicate start");
             return Err("Already recording".to_string());
         }
     }
@@ -629,8 +506,20 @@ async fn start_recording(
     {
         let mut state = recording_state.inner().lock().map_err(|e| e.to_string())?;
         *state = true;
-        DebugLogger::log_info("Recording state set to true");
+        DebugLogger::log_info("RECORDING_STATE_CHANGE: Set to true in start_recording (recording started)");
     }
+
+    // Show "Recording Started" notification
+    DebugLogger::log_info("Showing recording started notification");
+    let _ = app.notification()
+        .builder()
+        .title("Recording Started")
+        .body("Listening for speech...")
+        .show();
+
+    // Emit recording-started event to frontend to ensure state synchronization
+    DebugLogger::log_info("Emitting recording-started event to frontend");
+    let _ = app.emit("recording-started", ());
 
     // Create stop channel for proper audio cleanup
     let (stop_tx, stop_rx) = std::sync::mpsc::channel();
@@ -1206,6 +1095,18 @@ async fn start_recording(
         
         DebugLogger::log_info("Emitting recording-stopped event to frontend");
         let _ = app.emit("recording-stopped", ());
+        
+        // Show recording stopped notification (only once per session)
+        DebugLogger::log_info("Showing recording stopped notification");
+        app.notification()
+            .builder()
+            .title("Recording Complete")
+            .body("🎯 Audio processed successfully!")
+            .show()
+            .unwrap_or_else(|e| {
+                DebugLogger::log_info(&format!("Failed to show recording stopped notification: {}", e));
+            });
+            
         DebugLogger::log_info("=== PIPELINE CLEANUP COMPLETE ===");
     });
     
@@ -1710,6 +1611,7 @@ pub fn run() {
     tauri::Builder::default()
     .plugin(tauri_plugin_opener::init())
     .plugin(tauri_plugin_global_shortcut::Builder::new().build())
+    .plugin(tauri_plugin_notification::init())
         // Register Stronghold plugin for encrypted at-rest storage (JS guest APIs available)
         .setup(|app| {
             // derive salt path for argon2 KDF used by the plugin
@@ -1821,9 +1723,8 @@ pub fn run() {
             , clear_audio_manager_last_error
             , show_recording_timeout_notification
             , test_hotkey_parsing
-            , show_countdown_overlay
-            , show_recording_stopped_overlay
-            , show_instant_recording_overlay
+            , show_recording_started_notification
+            , show_recording_stopped_notification
         ])
         .setup(|app| {
             // Initialize debug logging first (disabled by default, will be enabled by frontend)

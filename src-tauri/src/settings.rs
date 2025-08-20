@@ -69,7 +69,6 @@ impl AppSettings {
 
         match entry.get_password() {
             Ok(pw) => {
-                println!("API_KEY: Successfully retrieved from keyring");
                 return Ok(pw);
             }
             Err(e) => {
