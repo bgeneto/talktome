@@ -396,8 +396,7 @@ async fn show_recording_stopped_notification(
     app.notification()
         .builder()
         .title("Recording Stopped")
-        .body("⏹️ Processing audio...")
-        .icon("icon.png")
+        .body("⏳ Processing audio...")
         .show()
         .map_err(|e| e.to_string())?;
         
@@ -514,7 +513,7 @@ async fn start_recording(
     let _ = app.notification()
         .builder()
         .title("Recording Started")
-        .body("Listening for speech...")
+        .body("🎤 Listening for speech...")
         .show();
 
     // Emit recording-started event to frontend to ensure state synchronization
