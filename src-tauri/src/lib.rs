@@ -1639,7 +1639,7 @@ async fn save_settings_from_frontend(
     max_recording_time_minutes: u32,
 ) -> Result<(), String> {
     // Create a new settings instance with the provided values
-    let mut settings = AppSettings {
+    let settings = AppSettings {
         spoken_language,
         translation_language,
         audio_device,

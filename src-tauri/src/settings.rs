@@ -2,8 +2,7 @@ use serde::{Deserialize, Serialize};
 // std::fs was used by legacy file-based API key handling which has been removed
 use keyring::Entry;
 use serde_json::json;
-use std::path::PathBuf;
-use tauri::{AppHandle, Manager};
+use tauri::AppHandle;
 
 #[derive(Serialize, Deserialize, Clone)]
 pub struct AppSettings {
