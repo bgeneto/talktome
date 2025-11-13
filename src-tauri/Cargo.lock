@@ -5873,6 +5873,8 @@ dependencies = [
  "cpal",
  "enigo",
  "env_logger",
+ "fastrand 2.3.0",
+ "hound",
  "keyring",
  "log",
  "nnnoiseless",
@@ -5885,6 +5887,7 @@ dependencies = [
  "tauri-plugin-notification",
  "tauri-plugin-opener",
  "tauri-plugin-stronghold",
+ "thiserror 1.0.69",
  "tokio",
  "whoami",
 ]

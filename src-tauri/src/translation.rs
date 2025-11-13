@@ -1,6 +1,7 @@
 use crate::debug_logger::DebugLogger;
 use reqwest;
 use serde_json::{Value, json};
+use std::time::Duration;
 
 pub struct TranslationService {
     client: reqwest::Client,
@@ -96,84 +97,150 @@ impl TranslationService {
             "max_tokens": 1000
         });
 
-        // Log the full API request
+        // Log the API request details (without sensitive data)
         let url = format!("{}/chat/completions", self.api_endpoint);
-        DebugLogger::log_api_payload(&body, &url);
+        DebugLogger::log_info(&format!("TRANSLATION: Sending request to {}", url));
+        DebugLogger::log_info(&format!("TRANSLATION: Model: {}, Temperature: 0.3, Max tokens: 1000", self.model));
 
-        // Send request to chat completion API
-        DebugLogger::log_info("TRANSLATION: Sending HTTP POST request");
-        let response = self
-            .client
-            .post(&url)
-            .header("Authorization", format!("Bearer {}", self.api_key))
-            .header("Content-Type", "application/json")
-            .json(&body)
-            .send()
-            .await
-            .map_err(|e| {
-                let error_msg = format!("Request failed: {}", e);
-                DebugLogger::log_pipeline_error("translation", &error_msg);
-                error_msg
-            })?;
+        let max_retries = 3;
+        let mut last_error: Option<String> = None;
 
-        let status = response.status();
-        DebugLogger::log_info(&format!("Translation API response status: {}", status));
-        DebugLogger::log_info(&format!(
-            "Translation API response headers: {:?}",
-            response.headers()
-        ));
+        for attempt in 1..=max_retries {
+            DebugLogger::log_info(&format!("TRANSLATION attempt {}/{} to {}", attempt, max_retries, url));
 
-        if response.status().is_success() {
-            DebugLogger::log_info("TRANSLATION: Response is successful, reading response text");
-            let response_text = response.text().await.map_err(|e| {
-                let error_msg = format!("Failed to read response: {}", e);
-                DebugLogger::log_pipeline_error("translation", &error_msg);
-                error_msg
-            })?;
+            // Send request to chat completion API
+            DebugLogger::log_info("TRANSLATION: Sending HTTP POST request");
+            let response = self
+                .client
+                .post(&url)
+                .header("Authorization", format!("Bearer {}", self.api_key))
+                .header("Content-Type", "application/json")
+                .json(&body)
+                .send()
+                .await;
 
-            DebugLogger::log_info(&format!("Translation API raw response: {}", response_text));
+            match response {
+                Ok(resp) => {
+                    let status = resp.status();
+                    DebugLogger::log_info(&format!("Translation API response status: {}", status));
 
-            DebugLogger::log_info("TRANSLATION: Parsing JSON response");
-            let json: Value = serde_json::from_str(&response_text).map_err(|e| {
-                let error_msg = format!("JSON parsing error: {}", e);
-                DebugLogger::log_pipeline_error("translation", &error_msg);
-                error_msg
-            })?;
+                    if resp.status().is_success() {
+                        DebugLogger::log_info("TRANSLATION: Response is successful, reading response text");
+                        let response_text = resp.text().await.map_err(|e| {
+                            let error_msg = format!("Failed to read response body: {}", e);
+                            DebugLogger::log_pipeline_error("translation", &error_msg);
+                            error_msg
+                        })?;
 
-            DebugLogger::log_info(&format!(
-                "TRANSLATION: Parsed JSON: {}",
-                serde_json::to_string_pretty(&json).unwrap_or_default()
-            ));
+                        DebugLogger::log_info(&format!("Translation API raw response (truncated): {}...", &response_text[..response_text.len().min(200)]));
 
-            if let Some(translated_text) = json["choices"][0]["message"]["content"].as_str() {
-                let result = translated_text.trim().to_string();
-                DebugLogger::log_info(&format!("Translation API extracted text: '{}'", result));
-                Ok(result)
-            } else {
-                let error_msg = "No translation in response".to_string();
-                DebugLogger::log_pipeline_error("translation", &error_msg);
-                DebugLogger::log_info(&format!(
-                    "TRANSLATION: Available JSON structure: {}",
-                    serde_json::to_string_pretty(&json).unwrap_or_default()
-                ));
-                DebugLogger::log_translation_response(
-                    false,
-                    None,
-                    Some(&error_msg),
-                    Some(&response_text),
-                );
-                Err(error_msg)
+                        DebugLogger::log_info("TRANSLATION: Parsing JSON response");
+                        let json: Value = serde_json::from_str(&response_text).map_err(|e| {
+                            let error_msg = format!("Invalid JSON response: {}", e);
+                            DebugLogger::log_pipeline_error("translation", &error_msg);
+                            error_msg
+                        })?;
+
+                        // Extract the translated text from the response
+                        if let Some(choices) = json["choices"].as_array() {
+                            if let Some(choice) = choices.get(0) {
+                                if let Some(message) = choice["message"]["content"].as_str() {
+                                    let result = message.trim().to_string();
+                                    if result.is_empty() {
+                                        let error_msg = "API returned empty translation text";
+                                        DebugLogger::log_pipeline_error("translation", error_msg);
+                                        return Err(error_msg.to_string());
+                                    }
+                                    DebugLogger::log_info(&format!("TRANSLATION: Successfully extracted text ({} chars)", result.len()));
+                                    return Ok(result);
+                                }
+                            }
+                        }
+
+                        let error_msg = format!("API response missing expected content. Available structure: {:?}",
+                            json.as_object().map(|o| o.keys().collect::<Vec<_>>()).unwrap_or_default());
+                        DebugLogger::log_pipeline_error("translation", &error_msg);
+                        DebugLogger::log_translation_response(false, None, Some(&error_msg), Some(&response_text));
+                        return Err(error_msg);
+                    } else {
+                        DebugLogger::log_info("TRANSLATION: Response status indicates error, reading error details");
+
+                        let error_text = resp.text().await.unwrap_or_else(|_| "Unable to read error response".to_string());
+                        DebugLogger::log_info(&format!("Translation API error response: {}", error_text));
+
+                        // Categorize errors for better handling
+                        let error_msg = match status.as_u16() {
+                            400 => format!("Bad request (400): Invalid parameters or prompt too long - {}", error_text),
+                            401 => format!("Authentication failed (401): Invalid API key - {}", error_text),
+                            403 => format!("Access forbidden (403): Insufficient permissions - {}", error_text),
+                            404 => format!("API endpoint not found (404): Check API endpoint URL - {}", error_text),
+                            413 => format!("Request too large (413): Prompt exceeds token limit - {}", error_text),
+                            429 => format!("Rate limit exceeded (429): Too many requests - {}", error_text),
+                            500..=599 => format!("Server error ({}): API service unavailable - {}", status, error_text),
+                            _ => format!("API error ({}): {} - {}", status, status.canonical_reason().unwrap_or("Unknown"), error_text)
+                        };
+
+                        // Don't retry on client errors (4xx) except rate limits
+                        if status.is_client_error() && status.as_u16() != 429 {
+                            DebugLogger::log_pipeline_error("translation", &error_msg);
+                            DebugLogger::log_translation_response(false, None, Some(&error_msg), Some(&error_text));
+                            return Err(error_msg);
+                        }
+
+                        // Store error for potential retry
+                        last_error = Some(error_msg.clone());
+                        DebugLogger::log_info(&format!("TRANSLATION: Error is retryable, attempt {}/{}", attempt, max_retries));
+                    }
+                }
+                Err(e) => {
+                    let error_category = if e.is_timeout() {
+                        "timeout"
+                    } else if e.is_connect() {
+                        "connection"
+                    } else if e.is_request() {
+                        "request"
+                    } else {
+                        "network"
+                    };
+
+                    let error_msg = format!("{} error: {}", error_category, e);
+                    DebugLogger::log_info(&format!("TRANSLATION: {} error on attempt {}", error_category, attempt));
+                    last_error = Some(error_msg);
+
+                    // Don't retry on request errors (malformed requests)
+                    if e.is_request() {
+                        DebugLogger::log_pipeline_error("translation", &last_error.as_ref().unwrap());
+                        DebugLogger::log_translation_response(false, None, Some(&last_error.as_ref().unwrap()), None);
+                        return Err(last_error.unwrap());
+                    }
+                }
             }
-        } else {
-            DebugLogger::log_info(
-                "TRANSLATION: Response status is not successful, reading error response",
-            );
-            let error_text = response.text().await.unwrap_or_default();
-            let error_msg = format!("API error: {} - {}", status, error_text);
-            DebugLogger::log_pipeline_error("translation", &error_msg);
-            DebugLogger::log_translation_response(false, None, Some(&error_msg), Some(&error_text));
-            Err(error_msg)
+
+            // Don't retry on the last attempt
+            if attempt == max_retries {
+                break;
+            }
+
+            // Exponential backoff with jitter
+            let base_delay = Duration::from_millis(500);
+            let exponential_delay = base_delay * (2_u32.pow(attempt - 1));
+            let max_delay = Duration::from_secs(5);
+            let delay = std::cmp::min(exponential_delay, max_delay);
+
+            // Add small random jitter to prevent thundering herd
+            let jitter = Duration::from_millis(fastrand::u64(0..100));
+            let total_delay = delay + jitter;
+
+            DebugLogger::log_info(&format!("TRANSLATION: Retrying in {}ms (attempt {}/{})", total_delay.as_millis(), attempt + 1, max_retries));
+            tokio::time::sleep(total_delay).await;
         }
+
+        // All retries exhausted
+        let final_error = last_error.unwrap_or_else(|| "Unknown error after all retries".to_string());
+        let error_msg = format!("Translation request failed after {} attempts: {}", max_retries, final_error);
+        DebugLogger::log_pipeline_error("translation", &error_msg);
+        DebugLogger::log_translation_response(false, None, Some(&error_msg), None);
+        Err(error_msg)
     }
 
     fn get_language_name(&self, lang_code: &str) -> &str {

@@ -72,55 +72,7 @@ impl DebugLogger {
         Ok(())
     }
 
-    /// Save a WAV (or any binary) dump alongside the log file for debugging and return the path
-    pub fn save_wav_dump(label: &str, bytes: &[u8]) -> Option<std::path::PathBuf> {
-        // Check if debug logging is enabled first
-        if !Self::is_debug_enabled() {
-            return None;
-        }
 
-        // Determine base logs directory from current log path
-        let log_path = if let Ok(path) = LOG_PATH.lock() {
-            if let Some(ref path) = *path {
-                path.clone()
-            } else {
-                return None;
-            }
-        } else {
-            return None;
-        };
-
-        let logs_dir = match log_path.parent() {
-            Some(dir) => dir.to_path_buf(),
-            None => return None,
-        };
-
-        // Build filename with timestamp
-        let ts = chrono::Utc::now().format("%Y%m%d_%H%M%S%.3f");
-        let filename = format!("{}_{}.wav", label, ts);
-        let out_path = logs_dir.join(filename);
-
-        // Best-effort create dir and write
-        if let Err(e) = std::fs::create_dir_all(&logs_dir) {
-            Self::write_log(&format!("SAVE_WAV_DUMP: Failed to ensure logs dir: {}", e));
-            return None;
-        }
-
-        match std::fs::write(&out_path, bytes) {
-            Ok(_) => {
-                Self::write_log(&format!(
-                    "SAVE_WAV_DUMP: Wrote {} bytes to {}",
-                    bytes.len(),
-                    out_path.display()
-                ));
-                Some(out_path)
-            }
-            Err(e) => {
-                Self::write_log(&format!("SAVE_WAV_DUMP: Failed to write WAV: {}", e));
-                None
-            }
-        }
-    }
 
     /// Initialize debug logging with explicit state
     pub fn init_with_state(app_handle: &AppHandle, enabled: bool) -> Result<(), String> {
@@ -406,6 +358,66 @@ impl DebugLogger {
             *enabled
         } else {
             false
+        }
+    }
+
+    /// Save WAV dump for debugging audio processing
+    pub fn save_wav_dump(label: &str, audio_data: &[f32]) -> Option<String> {
+        if !Self::is_debug_enabled() {
+            return None;
+        }
+
+        // Get log directory
+        let log_dir = if let Ok(path) = LOG_PATH.lock() {
+            if let Some(ref path) = *path {
+                path.parent().unwrap_or(path).to_path_buf()
+            } else {
+                return None;
+            }
+        } else {
+            return None;
+        };
+
+        // Create wav_dumps subdirectory
+        let wav_dir = log_dir.join("wav_dumps");
+        if let Err(_) = std::fs::create_dir_all(&wav_dir) {
+            return None;
+        }
+
+        // Generate filename with timestamp
+        let timestamp = chrono::Utc::now().format("%Y%m%d_%H%M%S");
+        let filename = format!("{}_{}.wav", label, timestamp);
+        let filepath = wav_dir.join(&filename);
+
+        // Convert f32 samples to i16 for WAV format
+        let i16_samples: Vec<i16> = audio_data
+            .iter()
+            .map(|&sample| (sample * i16::MAX as f32) as i16)
+            .collect();
+
+        // Create WAV file
+        let spec = hound::WavSpec {
+            channels: 1,
+            sample_rate: 16000, // Assuming 16kHz sample rate
+            bits_per_sample: 16,
+            sample_format: hound::SampleFormat::Int,
+        };
+
+        match hound::WavWriter::create(&filepath, spec) {
+            Ok(mut writer) => {
+                for &sample in &i16_samples {
+                    if writer.write_sample(sample).is_err() {
+                        return None;
+                    }
+                }
+                if writer.finalize().is_ok() {
+                    Self::write_log(&format!("WAV_DUMP: Saved {} samples to {}", audio_data.len(), filename));
+                    Some(filepath.to_string_lossy().to_string())
+                } else {
+                    None
+                }
+            }
+            Err(_) => None,
         }
     }
 }

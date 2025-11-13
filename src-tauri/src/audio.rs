@@ -365,12 +365,11 @@ impl AudioCapture {
 
                 // Save original audio to WAV if debug is enabled
                 if DebugLogger::is_debug_enabled() {
-                    let original_wav = encode_wav_bytes(&final_audio, sr);
                     let timestamp = std::time::SystemTime::now()
                         .duration_since(std::time::UNIX_EPOCH)
                         .unwrap_or_default()
                         .as_secs();
-                    DebugLogger::save_wav_dump(&format!("original_{}", timestamp), &original_wav);
+                    DebugLogger::save_wav_dump(&format!("original_{}", timestamp), &final_audio);
                     DebugLogger::log_info(&format!(
                         "Saved original audio recording: {} samples",
                         final_audio.len()
@@ -419,12 +418,11 @@ impl AudioCapture {
 
                 // Save noise-reduced audio to WAV if debug is enabled
                 if DebugLogger::is_debug_enabled() {
-                    let processed_wav = encode_wav_bytes(&processed_audio, 16000); // Always 16kHz output
                     let timestamp = std::time::SystemTime::now()
                         .duration_since(std::time::UNIX_EPOCH)
                         .unwrap_or_default()
                         .as_secs();
-                    DebugLogger::save_wav_dump(&format!("noiseless_{}", timestamp), &processed_wav);
+                    DebugLogger::save_wav_dump(&format!("noiseless_{}", timestamp), &processed_audio);
                     DebugLogger::log_info(&format!(
                         "Saved noise-reduced audio recording: {} samples at 16kHz",
                         processed_audio.len()

@@ -11,6 +11,7 @@ use std::sync::{Arc, Mutex};
 static AUDIO_MANAGER_LAST_ERROR: Mutex<Option<String>> = Mutex::new(None);
 use std::sync::mpsc as std_mpsc;
 // no additional thread/state for AudioCapture; it's not Send
+pub mod error;
 mod settings;
 use settings::AppSettings;
 mod audio;
@@ -52,11 +53,7 @@ enum AudioManagerCommand {
 // Arc+Mutex wrapper so we can store the command sender in Tauri managed state
 type AudioManagerHandle = Arc<Mutex<std_mpsc::Sender<AudioManagerCommand>>>;
 
-// Learn more about Tauri commands at https://tauri.app/develop/calling-rust/
-#[tauri::command]
-fn greet(name: &str) -> String {
-    format!("Hello, {}! You've been greeted from Rust!", name)
-}
+
 
 // Parse hotkey string to Shortcut struct
 fn parse_hotkey(hotkey: &str) -> Result<Shortcut, String> {
@@ -240,18 +237,24 @@ fn clear_audio_manager_last_error() {
     }
 }
 
-/// Test hotkey parsing (for debugging)
-#[tauri::command]
-fn test_hotkey_parsing(hotkey: String) -> Result<String, String> {
-    match parse_hotkey(&hotkey) {
-        Ok(shortcut) => {
-            Ok(format!("Successfully parsed hotkey '{}': {:?}", hotkey, shortcut))
-        }
-        Err(e) => {
-            Err(format!("Failed to parse hotkey '{}': {}", hotkey, e))
-        }
+// Helper function to validate API endpoint and key
+pub fn validate_api_credentials(endpoint: &str, api_key: &str) -> crate::error::Result<()> {
+    if endpoint.trim().is_empty() {
+        return Err(crate::error::TalkToMeError::InvalidApiEndpoint);
     }
+
+    if !endpoint.starts_with("http://") && !endpoint.starts_with("https://") {
+        return Err(crate::error::TalkToMeError::InvalidApiEndpoint);
+    }
+
+    if api_key.trim().is_empty() {
+        return Err(crate::error::TalkToMeError::InvalidApiKey);
+    }
+
+    Ok(())
 }
+
+
 
 // Command to register hotkeys
 #[tauri::command]
@@ -403,76 +406,77 @@ async fn show_recording_stopped_notification(
     Ok(())
 }
 
-// Command to start recording
-#[tauri::command]
-async fn start_recording(
-    app: AppHandle, 
-    recording_state: State<'_, RecordingState>,
-    audio_stop_sender: State<'_, AudioStopSender>,
-    audio_manager: State<'_, AudioManagerHandle>,
-    
-    spoken_language: String,
-    translation_language: String,
-    api_endpoint: String,
-    stt_model: String,
-    auto_mute: bool,
-    translation_enabled: bool,
-    translation_model: String,
-    text_insertion_enabled: bool,
-    audio_chunking_enabled: bool,
-    max_recording_time_minutes: u32,
-    debug_logging: bool
-) -> Result<(), String> {
-    // Check if already recording
-    {
-        let state = recording_state.inner().lock().map_err(|e| e.to_string())?;
-        if *state {
-            DebugLogger::log_info("start_recording called but already recording - rejecting duplicate start");
-            return Err("Already recording".to_string());
-        }
+// Helper function to validate recording prerequisites
+fn validate_recording_start(recording_state: &State<RecordingState>) -> Result<(), String> {
+    let state = recording_state.inner().lock().map_err(|e| e.to_string())?;
+    if *state {
+        DebugLogger::log_info("start_recording called but already recording - rejecting duplicate start");
+        return Err("Already recording".to_string());
     }
+    Ok(())
+}
 
-    // Get API key (use default AppSettings instance for the method)
-    DebugLogger::log_info("=== PIPELINE START: start_recording() called ===");
-    DebugLogger::log_info(&format!("Recording params: spoken_lang={}, translation_lang={}, endpoint={}, stt_model={}, auto_mute={}, translation_enabled={}, text_insertion_enabled={}, audio_chunking_enabled={}, debug_logging={}", 
-        spoken_language, translation_language, api_endpoint, stt_model, auto_mute, translation_enabled, text_insertion_enabled, audio_chunking_enabled, debug_logging));
-    
-    // Update debug logging state to match the frontend preference
-    DebugLogger::init_with_state(&app, debug_logging)?;
+// Helper function to get API key and initialize debug logging
+async fn initialize_recording_services(
+    app: &AppHandle,
+    debug_logging: bool,
+) -> Result<String, String> {
+    DebugLogger::init_with_state(app, debug_logging)?;
     DebugLogger::log_info(&format!("Debug logging state updated to: {}", debug_logging));
-    
+
     let settings_for_api = AppSettings::default();
-    let api_key = settings_for_api.get_api_key(&app).map_err(|e| {
+    let api_key = settings_for_api.get_api_key(app).map_err(|e| {
         let error_msg = format!("Failed to get API key: {}", e);
         DebugLogger::log_pipeline_error("settings", &error_msg);
         error_msg
     })?;
     DebugLogger::log_info(&format!("API key obtained, length: {} chars", api_key.len()));
-    
-    // Create a settings struct for the processing pipeline
-    let settings = AppSettings {
+    Ok(api_key)
+}
+
+// Helper function to create recording settings struct
+fn create_recording_settings(
+    spoken_language: String,
+    translation_language: String,
+    api_endpoint: String,
+    stt_model: String,
+    translation_model: String,
+    auto_mute: bool,
+    translation_enabled: bool,
+    debug_logging: bool,
+    text_insertion_enabled: bool,
+    audio_chunking_enabled: bool,
+    max_recording_time_minutes: u32,
+) -> AppSettings {
+    AppSettings {
         spoken_language,
         translation_language,
-        audio_device: "default".to_string(), // Not used in recording
-        theme: "auto".to_string(), // Not used in recording
-        auto_save: true, // Not used in recording
+        audio_device: "default".to_string(),
+        theme: "auto".to_string(),
+        auto_save: true,
         api_endpoint,
         stt_model,
-        translation_model: translation_model.clone(),
+        translation_model,
         hotkeys: crate::settings::Hotkeys {
-            hands_free: "".to_string(), // Not used in recording
+            hands_free: "".to_string(),
         },
         auto_mute,
         translation_enabled,
-        debug_logging, // Use the value passed from frontend
+        debug_logging,
         text_insertion_enabled,
         audio_chunking_enabled,
         max_recording_time_minutes,
-    };
-    
-    // Request the audio manager (single-thread owner) to start capture and return the receiver
+    }
+}
+
+// Helper function to start audio capture via audio manager
+async fn start_audio_capture(
+    audio_manager: &State<'_, AudioManagerHandle>,
+    audio_chunking_enabled: bool,
+) -> Result<std::sync::mpsc::Receiver<crate::audio::AudioChunk>, String> {
     DebugLogger::log_info("Requesting audio manager to start capture");
     let (reply_tx, reply_rx) = std_mpsc::channel();
+
     {
         let sender = audio_manager.lock().map_err(|e| e.to_string())?;
         sender.send(AudioManagerCommand::Start { reply: reply_tx, audio_chunking_enabled }).map_err(|e| {
@@ -481,26 +485,60 @@ async fn start_recording(
             msg
         })?;
     }
-    // Wait for manager to reply with the audio receiver
-    let audio_rx = match reply_rx.recv_timeout(std::time::Duration::from_secs(5)) {
-    Ok(Ok(rx)) => rx,
-    Ok(Err(e)) => {
+
+    match reply_rx.recv_timeout(std::time::Duration::from_secs(5)) {
+        Ok(Ok(rx)) => {
+            DebugLogger::log_info("Audio capture started successfully (owned by audio manager thread)");
+            Ok(rx)
+        }
+        Ok(Err(e)) => {
             DebugLogger::log_pipeline_error("audio_manager", &e);
-            return Err(e);
+            Err(e)
         }
         Err(e) => {
             let msg = format!("Timed out waiting for audio manager start reply: {}", e);
             DebugLogger::log_pipeline_error("audio_manager", &msg);
-            return Err(msg);
+            Err(msg)
         }
+    }
+}
+
+// Helper function to initialize services
+fn initialize_services(
+    settings: &AppSettings,
+    api_key: &str,
+) -> (STTService, Option<TranslationService>, Arc<TextInsertionService>) {
+    DebugLogger::log_info("Creating STT service");
+    let stt_service = STTService::new(
+        settings.api_endpoint.clone(),
+        api_key.to_string(),
+        settings.stt_model.clone(),
+        settings.spoken_language.clone(),
+    );
+    DebugLogger::log_info(&format!("STT service created with endpoint: {} and model: {}", settings.api_endpoint, settings.stt_model));
+
+    let translation_service = if settings.translation_enabled && settings.translation_language != "none" {
+        DebugLogger::log_info("Creating translation service (translation enabled)");
+        Some(TranslationService::new(settings.api_endpoint.clone(), api_key.to_string(), settings.translation_model.clone()))
+    } else {
+        DebugLogger::log_info("Creating translation service (text correction only)");
+        Some(TranslationService::new(settings.api_endpoint.clone(), api_key.to_string(), settings.translation_model.clone()))
     };
-    DebugLogger::log_info("Audio capture started successfully (owned by audio manager thread)");
-    
-    // Track recording start time for timeout monitoring
-    let recording_start_time = std::time::Instant::now();
-    let max_recording_duration = std::time::Duration::from_secs((max_recording_time_minutes as u64) * 60);
-    DebugLogger::log_info(&format!("Recording timeout set to {} minutes", max_recording_time_minutes));
-    
+    DebugLogger::log_info("Translation service created");
+
+    DebugLogger::log_info("Creating text insertion service");
+    let text_insertion_service = Arc::new(TextInsertionService::new());
+    DebugLogger::log_info("Text insertion service created");
+
+    (stt_service, translation_service, text_insertion_service)
+}
+
+// Helper function to setup recording state and notifications
+fn setup_recording_state(
+    app: &AppHandle,
+    recording_state: &State<RecordingState>,
+    audio_stop_sender: &State<AudioStopSender>,
+) -> Result<(std::sync::mpsc::Sender<()>, std::sync::mpsc::Receiver<()>), String> {
     // Set recording state to true
     {
         let mut state = recording_state.inner().lock().map_err(|e| e.to_string())?;
@@ -516,92 +554,122 @@ async fn start_recording(
         .body("🎤 Listening for speech...")
         .show();
 
-    // Emit recording-started event to frontend to ensure state synchronization
+    // Emit recording-started event to frontend
     DebugLogger::log_info("Emitting recording-started event to frontend");
     let _ = app.emit("recording-started", ());
 
     // Create stop channel for proper audio cleanup
     let (stop_tx, stop_rx) = std::sync::mpsc::channel();
-    
-    // Store the stop sender in global state so stop_recording can use it
+
+    // Store the stop sender in global state
     {
         let mut audio_stop = audio_stop_sender.inner().lock().map_err(|e| e.to_string())?;
-        *audio_stop = Some(stop_tx);
+        *audio_stop = Some(stop_tx.clone());
         DebugLogger::log_info("Audio stop sender stored in global state");
     }
 
-    // Keep the audio_capture alive (non-Send) until pipeline stops
-    
-    // Create services with API key
-    DebugLogger::log_info("Creating STT service");
-    let stt_service = STTService::new(
-        settings.api_endpoint.clone(),
-        api_key.clone(),
-        settings.stt_model.clone(),
-        settings.spoken_language.clone(),
-    );
-    DebugLogger::log_info(&format!("STT service created with endpoint: {} and model: {}", settings.api_endpoint, settings.stt_model));
-    
-    let translation_service = if settings.translation_enabled && settings.translation_language != "none" {
-        DebugLogger::log_info("Creating translation service (translation enabled)");
-        Some(TranslationService::new(settings.api_endpoint.clone(), api_key, settings.translation_model.clone()))
-    } else {
-        // Always create translation service for text correction
-        DebugLogger::log_info("Creating translation service (text correction only)");
-        Some(TranslationService::new(settings.api_endpoint.clone(), api_key, settings.translation_model.clone()))
-    };
-    DebugLogger::log_info("Translation service created");
-    
-    DebugLogger::log_info("Creating text insertion service");
-    let text_insertion_service = std::sync::Arc::new(TextInsertionService::new());
-    DebugLogger::log_info("Text insertion service created");
-    // Create a non-blocking background worker for text insertion so the audio
-    // pipeline never blocks on platform typing utilities (PowerShell/xdotool/etc.).
+    Ok((stop_tx, stop_rx))
+}
+
+// Helper function to spawn text insertion worker
+fn spawn_text_insertion_worker(
+    text_insertion_service: Arc<TextInsertionService>,
+) -> tokio::sync::mpsc::UnboundedSender<String> {
     let (text_insertion_tx, mut text_insertion_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
-    // Control channel for the worker to notify when insertion starts/ends
     let (insertion_ctrl_tx, mut _insertion_ctrl_rx) = tokio::sync::mpsc::unbounded_channel::<bool>();
 
-    // Spawn a dedicated background task that performs the blocking insertions
-    // using spawn_blocking so it doesn't block the Tokio runtime.
     let text_insertion_service_for_worker = text_insertion_service.clone();
     let insertion_ctrl_tx_for_worker = insertion_ctrl_tx.clone();
+
     tokio::spawn(async move {
         DebugLogger::log_info("TEXT_INSERTION_WORKER: started");
         while let Some(text) = text_insertion_rx.recv().await {
             DebugLogger::log_info(&format!("TEXT_INSERTION_WORKER: received text (len={}) to insert", text.len()));
-            // Signal insertion start
             let _ = insertion_ctrl_tx_for_worker.send(true);
-            
+
             let svc = text_insertion_service_for_worker.clone();
             let t = text.clone();
-            // Run the platform Command in a blocking thread pool
             let res = tokio::task::spawn_blocking(move || svc.insert_text(&t)).await;
             match res {
                 Ok(Ok(())) => DebugLogger::log_info("TEXT_INSERTION_WORKER: insertion succeeded"),
                 Ok(Err(e)) => DebugLogger::log_pipeline_error("text_insertion_worker", &format!("insertion error: {}", e)),
                 Err(e) => DebugLogger::log_pipeline_error("text_insertion_worker", &format!("spawn_blocking failed: {}", e)),
             }
-            // Signal insertion complete
             let _ = insertion_ctrl_tx_for_worker.send(false);
         }
         DebugLogger::log_info("TEXT_INSERTION_WORKER: exiting (sender closed)");
     });
-    
+
+    text_insertion_tx
+}
+
+// Command to start recording
+#[tauri::command]
+async fn start_recording(
+    app: AppHandle,
+    recording_state: State<'_, RecordingState>,
+    audio_stop_sender: State<'_, AudioStopSender>,
+    audio_manager: State<'_, AudioManagerHandle>,
+
+    spoken_language: String,
+    translation_language: String,
+    api_endpoint: String,
+    stt_model: String,
+    auto_mute: bool,
+    translation_enabled: bool,
+    translation_model: String,
+    text_insertion_enabled: bool,
+    audio_chunking_enabled: bool,
+    max_recording_time_minutes: u32,
+    debug_logging: bool
+) -> Result<(), String> {
+    DebugLogger::log_info("=== PIPELINE START: start_recording() called ===");
+    DebugLogger::log_info(&format!("Recording params: spoken_lang={}, translation_lang={}, endpoint={}, stt_model={}, auto_mute={}, translation_enabled={}, text_insertion_enabled={}, audio_chunking_enabled={}, debug_logging={}",
+        spoken_language, translation_language, api_endpoint, stt_model, auto_mute, translation_enabled, text_insertion_enabled, audio_chunking_enabled, debug_logging));
+
+    // Validate recording can start
+    validate_recording_start(&recording_state)?;
+
+    // Initialize services and get API key
+    let api_key = initialize_recording_services(&app, debug_logging).await?;
+
+    // Create settings struct
+    let settings = create_recording_settings(
+        spoken_language, translation_language, api_endpoint, stt_model,
+        translation_model, auto_mute, translation_enabled, debug_logging,
+        text_insertion_enabled, audio_chunking_enabled, max_recording_time_minutes
+    );
+
+    // Start audio capture
+    let audio_rx = start_audio_capture(&audio_manager, audio_chunking_enabled).await?;
+
+    // Setup recording state and notifications
+    let (_stop_tx, stop_rx) = setup_recording_state(&app, &recording_state, &audio_stop_sender)?;
+
+    // Initialize services
+    let (stt_service, translation_service, text_insertion_service) = initialize_services(&settings, &api_key);
+
+    // Spawn text insertion worker
+    let text_insertion_tx = spawn_text_insertion_worker(text_insertion_service);
+
+    // Track recording start time for timeout monitoring
+    let recording_start_time = std::time::Instant::now();
+    let max_recording_duration = std::time::Duration::from_secs((max_recording_time_minutes as u64) * 60);
+    DebugLogger::log_info(&format!("Recording timeout set to {} minutes", max_recording_time_minutes));
+
     // Clone values for the async task
     let app_clone = app.clone();
     let recording_state_clone = recording_state.inner().clone();
-    let auto_mute = settings.auto_mute;
-    
+
     // Spawn task to process audio chunks and monitor stop signal
     tokio::spawn(async move {
         // Create system audio control inside the task for auto-mute if enabled
-        DebugLogger::log_info(&format!("Auto-mute setting: {}", auto_mute));
-        let audio_control = if auto_mute {
+        DebugLogger::log_info(&format!("Auto-mute setting: {}", settings.auto_mute));
+        let audio_control = if settings.auto_mute {
             DebugLogger::log_info("Attempting to create system audio control for auto-mute");
             match SystemAudioControl::new() {
                 Ok(control) => {
                     DebugLogger::log_info("System audio control created successfully");
-                    // Mute system audio
                     if let Err(e) = control.mute_system_audio() {
                         let error_msg = format!("Failed to mute system audio: {}", e);
                         eprintln!("{}", error_msg);
@@ -622,32 +690,21 @@ async fn start_recording(
             DebugLogger::log_info("Auto-mute disabled, not creating system audio control");
             None
         };
-        
-    let stt_service = stt_service;
-    let translation_service = translation_service;
-    let app = app_clone;
-    let settings = settings;
-        
+
         DebugLogger::log_info("Starting audio processing pipeline");
-        DebugLogger::log_info(&format!("Pipeline settings: translation_enabled={}, spoken_lang={}, target_lang={}", 
+        DebugLogger::log_info(&format!("Pipeline settings: translation_enabled={}, spoken_lang={}, target_lang={}",
             settings.translation_enabled, settings.spoken_language, settings.translation_language));
-        
+
         DebugLogger::log_info("About to enter audio processing pipeline");
         DebugLogger::log_info(&format!("Audio chunking mode: {}", if settings.audio_chunking_enabled { "ENABLED (real-time chunks)" } else { "DISABLED (single recording)" }));
-        
+
         if settings.audio_chunking_enabled {
             // === CHUNKED MODE: Real-time processing ===
             DebugLogger::log_info("Waiting for first audio chunk...");
-            
-            // Move audio_rx into chunked mode
-            let audio_rx = audio_rx;
-            
-            // Aggregation state: accumulate text until recording stops
-            use std::time::Duration;
+
             let mut agg_text = String::new();
 
             fn append_dedup(agg: &mut String, next: &str) {
-                // Token-aware suffix/prefix dedup: use last up to 12 chars as heuristic
                 let take = agg.chars().rev().take(12).collect::<String>();
                 let tail: String = take.chars().rev().collect();
                 if !tail.is_empty() && next.starts_with(&tail) {
@@ -661,427 +718,385 @@ async fn start_recording(
             // Process audio chunks with timeout to detect stop/idle
             loop {
                 use std::sync::mpsc::RecvTimeoutError;
-            
-            // Check stop signal first
-            match stop_rx.try_recv() {
-                Ok(_) => {
-                    DebugLogger::log_info("STOP_REASON: Stop signal received manually, breaking processing loop");
-                    break;
-                }
-                Err(std::sync::mpsc::TryRecvError::Disconnected) => {
-                    DebugLogger::log_info("STOP_REASON: Stop signal channel disconnected (audio system failure), breaking processing loop");
-                    break;
-                }
-                Err(std::sync::mpsc::TryRecvError::Empty) => {
-                    // No stop signal, continue processing
-                }
-            }
-            
-            let audio_chunk = match audio_rx.recv_timeout(Duration::from_millis(200)) {
-                Ok(chunk) => chunk,
-                Err(RecvTimeoutError::Timeout) => {
-                    // Periodically check for stop
-                    let stop = {
-                        let state = recording_state_clone.lock().unwrap();
-                        !*state
-                    };
-                    if stop {
-                        DebugLogger::log_info("STOP_REASON: Recording state set to false (timeout check), breaking processing loop");
+
+                // Check stop signal first
+                match stop_rx.try_recv() {
+                    Ok(_) => {
+                        DebugLogger::log_info("STOP_REASON: Stop signal received manually, breaking processing loop");
                         break;
                     }
-                    
-                    // Check if recording has exceeded max time limit
-                    if recording_start_time.elapsed() >= max_recording_duration {
-                        DebugLogger::log_info(&format!("STOP_REASON: Recording exceeded maximum time limit of {} minutes", max_recording_time_minutes));
-                        
-                        // Set recording state to false
-                        {
-                            let mut state = recording_state_clone.lock().unwrap();
-                            *state = false;
+                    Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                        DebugLogger::log_info("STOP_REASON: Stop signal channel disconnected (audio system failure), breaking processing loop");
+                        break;
+                    }
+                    Err(std::sync::mpsc::TryRecvError::Empty) => {}
+                }
+
+                let audio_chunk = match audio_rx.recv_timeout(std::time::Duration::from_millis(200)) {
+                    Ok(chunk) => chunk,
+                    Err(RecvTimeoutError::Timeout) => {
+                        let stop = { let state = recording_state_clone.lock().unwrap(); !*state };
+                        if stop {
+                            DebugLogger::log_info("STOP_REASON: Recording state set to false (timeout check), breaking processing loop");
+                            break;
                         }
-                        
-                        // Emit timeout notification to frontend
-                        let _ = app.emit("recording-timeout", ());
-                        
+
+                        if recording_start_time.elapsed() >= max_recording_duration {
+                            DebugLogger::log_info(&format!("STOP_REASON: Recording exceeded maximum time limit of {} minutes", max_recording_time_minutes));
+                            { let mut state = recording_state_clone.lock().unwrap(); *state = false; }
+                            let _ = app_clone.emit("recording-timeout", ());
+                            break;
+                        }
+                        continue;
+                    }
+                    Err(RecvTimeoutError::Disconnected) => {
+                        DebugLogger::log_info("STOP_REASON: Audio channel disconnected (audio device/system failure), breaking processing loop");
                         break;
                     }
-                    
-                    // Continue waiting for more audio
+                };
+
+                DebugLogger::log_info("=== NEW AUDIO CHUNK RECEIVED ===");
+
+                { let state = recording_state_clone.lock().unwrap();
+                  if !*state {
+                      DebugLogger::log_info("STOP_REASON: Recording state set to false (chunk processing check), breaking audio processing loop");
+                      break;
+                  }
+                }
+
+                let max_amplitude = audio_chunk.data.iter().map(|&x| x.abs()).fold(0.0, f32::max);
+                let has_activity = audio_chunk.has_audio_activity();
+                DebugLogger::log_audio_chunk(audio_chunk.data.len(), audio_chunk.sample_rate, has_activity, max_amplitude);
+
+                if audio_chunk.is_empty() || !has_activity {
+                    DebugLogger::log_info("Skipping empty or silent audio chunk");
                     continue;
                 }
-                Err(RecvTimeoutError::Disconnected) => {
-                    DebugLogger::log_info("STOP_REASON: Audio channel disconnected (audio device/system failure), breaking processing loop");
-                    break;
-                }
-            };
-            DebugLogger::log_info("=== NEW AUDIO CHUNK RECEIVED ===");
-            
-            // Check if recording has been stopped
-            {
-                let state = recording_state_clone.lock().unwrap();
-                if !*state {
-                    DebugLogger::log_info("STOP_REASON: Recording state set to false (chunk processing check), breaking audio processing loop");
-                    break;
-                }
-            }
-            
-            // Handle all audio chunks the same way in simplified mode
-            // No special handling for silence chunks needed
-            
-            // Log audio chunk details
-            let max_amplitude = audio_chunk.data.iter().map(|&x| x.abs()).fold(0.0, f32::max);
-            let has_activity = audio_chunk.has_audio_activity();
-            DebugLogger::log_audio_chunk(audio_chunk.data.len(), audio_chunk.sample_rate, has_activity, max_amplitude);
 
-            // Skip empty or silent chunks
-            if audio_chunk.is_empty() || !has_activity {
-                DebugLogger::log_info("Skipping empty or silent audio chunk");
-                continue;
-            }
+                let _ = app_clone.emit("processing-audio", true);
 
-            // Emit status to frontend
-            let _ = app.emit("processing-audio", true);
+                DebugLogger::log_info("=== STARTING STT TRANSCRIPTION ===");
+                match stt_service.transcribe_chunk(audio_chunk.data, audio_chunk.sample_rate, None).await {
+                    Ok(transcribed_text) => {
+                        DebugLogger::log_transcription_response(true, Some(&transcribed_text), None);
+                        if !transcribed_text.trim().is_empty() {
+                            append_dedup(&mut agg_text, &transcribed_text);
+                            DebugLogger::log_info(&format!("Aggregated text length now: {}", agg_text.len()));
 
-            // Transcribe audio chunk
-            DebugLogger::log_info("=== STARTING STT TRANSCRIPTION ===");
-            match stt_service.transcribe_chunk(audio_chunk.data, audio_chunk.sample_rate, None).await {
-                Ok(transcribed_text) => {
-                    DebugLogger::log_transcription_response(true, Some(&transcribed_text), None);
-                    if !transcribed_text.trim().is_empty() {
-                        append_dedup(&mut agg_text, &transcribed_text);
-                        DebugLogger::log_info(&format!("Aggregated text length now: {}", agg_text.len()));
-                        
-                        // Store transcribed text but don't insert yet - wait for user to stop recording
-                        DebugLogger::log_info("TEXT_INSERTION: deferring until user stops recording");
-                        
-                        // Emit transcribed text to frontend for display (without final processing)
-                        let _ = app.emit("transcribed-text", serde_json::json!({
-                            "raw": agg_text,
-                            "final": agg_text  // Show raw text for now
-                        }));
+                            // Store transcribed text but don't insert yet - wait for user to stop recording
+                            DebugLogger::log_info("TEXT_INSERTION: deferring until user stops recording");
+
+                            // Emit transcribed text to frontend for display (without final processing)
+                            let _ = app_clone.emit("transcribed-text", serde_json::json!({
+                                "raw": agg_text,
+                                "final": agg_text  // Show raw text for now
+                            }));
+                        }
+                        let _ = app_clone.emit("processing-audio", false);
                     }
-                    let _ = app.emit("processing-audio", false);
-                }
-                Err(e) => {
-                    DebugLogger::log_transcription_response(false, None, Some(&e));
-                    DebugLogger::log_pipeline_error("transcription", &e);
-                    let _ = app.emit("processing-error", format!("Transcription error: {}", e));
-                    let _ = app.emit("processing-audio", false);
-                }
-            }
-    }
-        
-        DebugLogger::log_info("Audio receiver channel closed - no more audio chunks");
-        DebugLogger::log_info("This could indicate:");
-        DebugLogger::log_info("1. Audio stream ended unexpectedly");
-        DebugLogger::log_info("2. Audio capture was stopped externally");  
-        DebugLogger::log_info("3. Audio channel sender was dropped");
-        DebugLogger::log_info("=== PIPELINE CLEANUP STARTING ===");
-        // Unmute system audio if it was muted
-        if let Some(ref audio_control) = audio_control {
-            if audio_control.is_muted() {
-                DebugLogger::log_info("Attempting to unmute system audio during cleanup");
-                if let Err(e) = audio_control.unmute_system_audio() {
-                    let error_msg = format!("Failed to unmute system audio during cleanup: {}", e);
-                    eprintln!("{}", error_msg);
-                    DebugLogger::log_pipeline_error("system_audio_cleanup", &error_msg);
-                } else {
-                    DebugLogger::log_info("System audio unmuted successfully during cleanup");
-                }
-            } else {
-                DebugLogger::log_info("System audio was not muted, no cleanup needed");
-            }
-        } else {
-            DebugLogger::log_info("No system audio control to clean up");
-        }
-        
-        // Final flush - process and insert text when recording stops
-        if !agg_text.trim().is_empty() {
-            let raw_text = agg_text.clone();
-            DebugLogger::log_info("TEXT_INSERTION: processing final text after recording stopped");
-            let final_text = if let Some(ref translation_service) = translation_service {
-                match translation_service.process_text(
-                    &agg_text,
-                    &settings.spoken_language,
-                    &settings.translation_language,
-                    settings.translation_enabled
-                ).await {
-                    Ok(processed_text) => {
-                        DebugLogger::log_translation_response(true, Some(&processed_text), None, None);
-                        processed_text
-                    },
                     Err(e) => {
-                        DebugLogger::log_translation_response(false, None, Some(&e), None);
-                        DebugLogger::log_pipeline_error("translation", &e);
-                        let _ = app.emit("processing-error", format!("Translation Error - Using fallback: {}", e));
-                        agg_text.clone()
+                        DebugLogger::log_transcription_response(false, None, Some(&e));
+                        DebugLogger::log_pipeline_error("transcription", &e);
+                        let _ = app_clone.emit("processing-error", format!("Transcription error: {}", e));
+                        let _ = app_clone.emit("processing-audio", false);
                     }
                 }
-            } else {
-                agg_text.clone()
-            };
-            
-            // Now insert the text since recording has stopped
-            DebugLogger::log_info("TEXT_INSERTION: queueing text for insertion (recording stopped)");
-            if settings.text_insertion_enabled {
-                if let Err(e) = text_insertion_tx.send(final_text.clone()) {
-                    DebugLogger::log_pipeline_error("text_insertion", &format!("failed to queue text (final flush): {}", e));
+            }
+
+            DebugLogger::log_info("Audio receiver channel closed - no more audio chunks");
+            DebugLogger::log_info("This could indicate:");
+            DebugLogger::log_info("1. Audio stream ended unexpectedly");
+            DebugLogger::log_info("2. Audio capture was stopped externally");
+            DebugLogger::log_info("3. Audio channel sender was dropped");
+            DebugLogger::log_info("=== PIPELINE CLEANUP STARTING ===");
+
+            // Unmute system audio if it was muted
+            if let Some(ref audio_control) = audio_control {
+                if audio_control.is_muted() {
+                    DebugLogger::log_info("Attempting to unmute system audio during cleanup");
+                    if let Err(e) = audio_control.unmute_system_audio() {
+                        let error_msg = format!("Failed to unmute system audio during cleanup: {}", e);
+                        eprintln!("{}", error_msg);
+                        DebugLogger::log_pipeline_error("system_audio_cleanup", &error_msg);
+                    } else {
+                        DebugLogger::log_info("System audio unmuted successfully during cleanup");
+                    }
                 } else {
-                    DebugLogger::log_text_insertion(&final_text, true, None);
-                    DebugLogger::log_info("TEXT_INSERTION: queued (recording stopped)");
+                    DebugLogger::log_info("System audio was not muted, no cleanup needed");
                 }
             } else {
-                DebugLogger::log_info("TEXT_INSERTION: skipped (text insertion disabled)");
+                DebugLogger::log_info("No system audio control to clean up");
             }
-            
-            // Emit final processed text to frontend
-            let _ = app.emit("transcribed-text", serde_json::json!({
-                "raw": raw_text,
-                "final": final_text
-            }));
-        }
+
+            // Final flush - process and insert text when recording stops
+            if !agg_text.trim().is_empty() {
+                let raw_text = agg_text.clone();
+                DebugLogger::log_info("TEXT_INSERTION: processing final text after recording stopped");
+                let final_text = if let Some(ref translation_service) = translation_service {
+                    match translation_service.process_text(
+                        &agg_text,
+                        &settings.spoken_language,
+                        &settings.translation_language,
+                        settings.translation_enabled
+                    ).await {
+                        Ok(processed_text) => {
+                            DebugLogger::log_translation_response(true, Some(&processed_text), None, None);
+                            processed_text
+                        },
+                        Err(e) => {
+                            DebugLogger::log_translation_response(false, None, Some(&e), None);
+                            DebugLogger::log_pipeline_error("translation", &e);
+                            let _ = app_clone.emit("processing-error", format!("Translation Error - Using fallback: {}", e));
+                            agg_text.clone()
+                        }
+                    }
+                } else {
+                    agg_text.clone()
+                };
+
+                // Now insert the text since recording has stopped
+                DebugLogger::log_info("TEXT_INSERTION: queueing text for insertion (recording stopped)");
+                if settings.text_insertion_enabled {
+                    if let Err(e) = text_insertion_tx.send(final_text.clone()) {
+                        DebugLogger::log_pipeline_error("text_insertion", &format!("failed to queue text (final flush): {}", e));
+                    } else {
+                        DebugLogger::log_text_insertion(&final_text, true, None);
+                        DebugLogger::log_info("TEXT_INSERTION: queued (recording stopped)");
+                    }
+                } else {
+                    DebugLogger::log_info("TEXT_INSERTION: skipped (text insertion disabled)");
+                }
+
+                // Emit final processed text to frontend
+                let _ = app_clone.emit("transcribed-text", serde_json::json!({
+                    "raw": raw_text,
+                    "final": final_text
+                }));
+            }
 
         } else {
             // === SINGLE RECORDING MODE: Capture entire session ===
             DebugLogger::log_info("Starting single recording session - collecting all audio data...");
-            
-            // Move audio_rx into single recording mode
-            let audio_rx = audio_rx;
-            
-            // Spawn a separate task for single recording mode to avoid blocking UI
-            let app_single = app.clone();
-            let stop_rx_single = stop_rx;
-            let recording_state_single = recording_state_clone.clone();
-            let stt_service_single = stt_service;
-            let translation_service_single = translation_service;
-            let settings_single = settings.clone();
-            let text_insertion_tx_single = text_insertion_tx.clone();
-            
-            // Run single recording session inline and await completion so the outer pipeline
-            // does not proceed to cleanup while the single-recording task is still active.
-            (async move {
-                let mut all_audio_data: Vec<f32> = Vec::new();
-                let mut sample_rate = 48000; // Default sample rate, will be updated from first chunk
-                
-                // Collect all audio data until recording stops
-                loop {
-                    use std::sync::mpsc::RecvTimeoutError;
-                    
-                    // Check stop signal first
-                    match stop_rx_single.try_recv() {
-                        Ok(_) => {
-                            DebugLogger::log_info("STOP_REASON: Stop signal received manually, draining remaining chunks before ending single recording session");
-                            // Drain remaining chunks from the channel to prevent backup
-                            let drain_start = std::time::Instant::now();
-                            let mut drained_count = 0;
-                            while drain_start.elapsed() < std::time::Duration::from_millis(500) {
-                                match audio_rx.try_recv() {
-                                    Ok(_) => drained_count += 1,
-                                    Err(_) => break,
-                                }
+
+            let mut all_audio_data: Vec<f32> = Vec::new();
+            let mut sample_rate = 48000; // Default sample rate, will be updated from first chunk
+
+            // Collect all audio data until recording stops
+            loop {
+                use std::sync::mpsc::RecvTimeoutError;
+
+                // Check stop signal first
+                match stop_rx.try_recv() {
+                    Ok(_) => {
+                        DebugLogger::log_info("STOP_REASON: Stop signal received manually, draining remaining chunks before ending single recording session");
+                        // Drain remaining chunks from the channel to prevent backup
+                        let drain_start = std::time::Instant::now();
+                        let mut drained_count = 0;
+                        while drain_start.elapsed() < std::time::Duration::from_millis(500) {
+                            match audio_rx.try_recv() {
+                                Ok(_) => drained_count += 1,
+                                Err(_) => break,
                             }
-                            if drained_count > 0 {
-                                DebugLogger::log_info(&format!("Single recording: drained {} remaining chunks from audio channel", drained_count));
-                            }
-                            break;
                         }
-                        Err(std::sync::mpsc::TryRecvError::Disconnected) => {
-                            DebugLogger::log_info("STOP_REASON: Stop signal channel disconnected, draining remaining chunks before ending single recording session");
-                            // Drain remaining chunks from the channel to prevent backup
-                            let drain_start = std::time::Instant::now();
-                            let mut drained_count = 0;
-                            while drain_start.elapsed() < std::time::Duration::from_millis(500) {
-                                match audio_rx.try_recv() {
-                                    Ok(_) => drained_count += 1,
-                                    Err(_) => break,
-                                }
-                            }
-                            if drained_count > 0 {
-                                DebugLogger::log_info(&format!("Single recording: drained {} remaining chunks from audio channel", drained_count));
-                            }
-                            break;
+                        if drained_count > 0 {
+                            DebugLogger::log_info(&format!("Single recording: drained {} remaining chunks from audio channel", drained_count));
                         }
-                        Err(std::sync::mpsc::TryRecvError::Empty) => {
-                            // No stop signal, continue collecting
-                        }
+                        break;
                     }
-                    
-                    let audio_chunk = match audio_rx.recv_timeout(std::time::Duration::from_millis(200)) {
-                        Ok(chunk) => chunk,
-                        Err(RecvTimeoutError::Timeout) => {
-                            // Check if recording state changed
-                            let stop = {
-                                let state = recording_state_single.lock().unwrap();
-                                !*state
-                            };
-                            if stop {
-                                DebugLogger::log_info("STOP_REASON: Recording state set to false (single recording mode), draining remaining chunks before ending session");
-                                // Wait longer for the audio processing thread to send the final chunk
-                                DebugLogger::log_info("DRAIN_PHASE: Waiting for final audio processing to complete...");
-                                let drain_start = std::time::Instant::now();
-                                let mut drained_count = 0;
-                                let mut final_chunk_received = false;
-                                
-                                // Wait up to 2 seconds for final chunk (audio processing takes time)
-                                while drain_start.elapsed() < std::time::Duration::from_millis(2000) {
-                                    match audio_rx.recv_timeout(std::time::Duration::from_millis(100)) {
-                                        Ok(chunk) => {
-                                            drained_count += 1;
-                                            final_chunk_received = true;
-                                            DebugLogger::log_info(&format!("DRAIN_PHASE: Received final audio chunk {} samples at {}Hz", chunk.data.len(), chunk.sample_rate));
-                                            
-                                            // Process this final chunk
-                                            if !chunk.data.is_empty() {
-                                                sample_rate = chunk.sample_rate;
-                                                all_audio_data.extend_from_slice(&chunk.data);
-                                            }
-                                        }
-                                        Err(_) => {
-                                            // Continue waiting if no final chunk yet
-                                            if final_chunk_received {
-                                                break; // We got the final chunk, no more expected
-                                            }
-                                            std::thread::sleep(std::time::Duration::from_millis(50));
-                                        }
-                                    }
-                                }
-                                
-                                DebugLogger::log_info(&format!("DRAIN_PHASE: Completed - received {} chunks, final_chunk_received: {}", drained_count, final_chunk_received));
-                                break;
+                    Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                        DebugLogger::log_info("STOP_REASON: Stop signal channel disconnected, draining remaining chunks before ending single recording session");
+                        // Drain remaining chunks from the channel to prevent backup
+                        let drain_start = std::time::Instant::now();
+                        let mut drained_count = 0;
+                        while drain_start.elapsed() < std::time::Duration::from_millis(500) {
+                            match audio_rx.try_recv() {
+                                Ok(_) => drained_count += 1,
+                                Err(_) => break,
                             }
-                            
-                            // Check if recording has exceeded max time limit
-                            if recording_start_time.elapsed() >= max_recording_duration {
-                                DebugLogger::log_info(&format!("STOP_REASON: Single recording exceeded maximum time limit of {} minutes", max_recording_time_minutes));
-                                
-                                // Set recording state to false
-                                {
-                                    let mut state = recording_state_single.lock().unwrap();
-                                    *state = false;
-                                }
-                                
-                                // Emit timeout notification to frontend
-                                let _ = app_single.emit("recording-timeout", ());
-                                
-                                // Drain remaining chunks and break
-                                let drain_start = std::time::Instant::now();
-                                let mut drained_count = 0;
-                                while drain_start.elapsed() < std::time::Duration::from_millis(500) {
-                                    match audio_rx.try_recv() {
-                                        Ok(_) => drained_count += 1,
-                                        Err(_) => break,
-                                    }
-                                }
-                                if drained_count > 0 {
-                                    DebugLogger::log_info(&format!("Single recording: drained {} remaining chunks from audio channel after timeout", drained_count));
-                                }
-                                break;
-                            }
-                            
-                            continue; // Keep waiting for more audio
                         }
-                        Err(RecvTimeoutError::Disconnected) => {
-                            DebugLogger::log_info("STOP_REASON: Audio channel disconnected, ending single recording session");
-                            break;
+                        if drained_count > 0 {
+                            DebugLogger::log_info(&format!("Single recording: drained {} remaining chunks from audio channel", drained_count));
                         }
-                    };
-                    
-                    // Collect audio data from this chunk
-                    if !audio_chunk.data.is_empty() {
-                        sample_rate = audio_chunk.sample_rate;
-                        all_audio_data.extend_from_slice(&audio_chunk.data);
+                        break;
                     }
+                    Err(std::sync::mpsc::TryRecvError::Empty) => {}
                 }
-                
-                // Process the complete audio recording
-                if !all_audio_data.is_empty() {
-                    DebugLogger::log_info(&format!("Single recording complete: {} samples ({:.1}s) at {}Hz", 
-                        all_audio_data.len(), all_audio_data.len() as f32 / sample_rate as f32, sample_rate));
-                    
-                    // Convert to WAV format and send to STT service
-                    DebugLogger::log_info("Sending complete recording to STT service...");
-                    
-                    match stt_service_single.transcribe_chunk(all_audio_data, sample_rate, Some("stt_single")).await {
-                            Ok(transcription) => {
-                                DebugLogger::log_info(&format!("STT complete transcription: '{}'", transcription));
-                                
-                                // IMMEDIATELY emit raw transcription to frontend (don't wait for translation)
-                                let _ = app_single.emit("transcribed-text", serde_json::json!({
-                                    "raw": transcription,
-                                    "final": "" // Empty final initially - will be updated when translation completes
-                                }));
-                                DebugLogger::log_info("EMIT: Sent raw transcription immediately to frontend");
-                                
-                                // Now do translation/correction in background and emit update when done
-                                let final_text = if let Some(ref translation_service) = translation_service_single {
-                                    match translation_service.process_text(
-                                        &transcription,
-                                        &settings_single.spoken_language,
-                                        &settings_single.translation_language,
-                                        settings_single.translation_enabled
-                                    ).await {
-                                        Ok(processed_text) => {
-                                            DebugLogger::log_translation_response(true, Some(&processed_text), None, None);
-                                            
-                                            // Emit updated transcription with final processed text
-                                            let _ = app_single.emit("transcribed-text", serde_json::json!({
-                                                "raw": transcription,
-                                                "final": processed_text
-                                            }));
-                                            DebugLogger::log_info("EMIT: Sent final processed text to frontend");
-                                            
-                                            processed_text
-                                        },
-                                        Err(e) => {
-                                            DebugLogger::log_translation_response(false, None, Some(&e), None);
-                                            DebugLogger::log_pipeline_error("translation", &e);
-                                            let _ = app_single.emit("processing-error", format!("Translation Error - Using fallback: {}", e));
-                                            
-                                            // Even if translation fails, emit the raw transcription as final
-                                            let _ = app_single.emit("transcribed-text", serde_json::json!({
-                                                "raw": transcription,
-                                                "final": transcription // Use raw transcription as fallback
-                                            }));
-                                            DebugLogger::log_info("EMIT: Sent raw transcription as fallback final text");
-                                            
-                                            transcription.clone()
+
+                let audio_chunk = match audio_rx.recv_timeout(std::time::Duration::from_millis(200)) {
+                    Ok(chunk) => chunk,
+                    Err(RecvTimeoutError::Timeout) => {
+                        // Check if recording state changed
+                        let stop = {
+                            let state = recording_state_clone.lock().unwrap();
+                            !*state
+                        };
+                        if stop {
+                            DebugLogger::log_info("STOP_REASON: Recording state set to false (single recording mode), draining remaining chunks before ending session");
+                            // Wait longer for the audio processing thread to send the final chunk
+                            DebugLogger::log_info("DRAIN_PHASE: Waiting for final audio processing to complete...");
+                            let drain_start = std::time::Instant::now();
+                            let mut drained_count = 0;
+                            let mut final_chunk_received = false;
+
+                            // Wait up to 2 seconds for final chunk (audio processing takes time)
+                            while drain_start.elapsed() < std::time::Duration::from_millis(2000) {
+                                match audio_rx.recv_timeout(std::time::Duration::from_millis(100)) {
+                                    Ok(chunk) => {
+                                        drained_count += 1;
+                                        final_chunk_received = true;
+                                        DebugLogger::log_info(&format!("DRAIN_PHASE: Received final audio chunk {} samples at {}Hz", chunk.data.len(), chunk.sample_rate));
+
+                                        // Process this final chunk
+                                        if !chunk.data.is_empty() {
+                                            sample_rate = chunk.sample_rate;
+                                            all_audio_data.extend_from_slice(&chunk.data);
                                         }
                                     }
-                                } else {
-                                    // No translation service - just send raw transcription as final
-                                    let _ = app_single.emit("transcribed-text", serde_json::json!({
+                                    Err(_) => {
+                                        // Continue waiting if no final chunk yet
+                                        if final_chunk_received {
+                                            break; // We got the final chunk, no more expected
+                                        }
+                                        std::thread::sleep(std::time::Duration::from_millis(50));
+                                    }
+                                }
+                            }
+
+                            DebugLogger::log_info(&format!("DRAIN_PHASE: Completed - received {} chunks, final_chunk_received: {}", drained_count, final_chunk_received));
+                            break;
+                        }
+
+                        // Check if recording has exceeded max time limit
+                        if recording_start_time.elapsed() >= max_recording_duration {
+                            DebugLogger::log_info(&format!("STOP_REASON: Single recording exceeded maximum time limit of {} minutes", max_recording_time_minutes));
+
+                            // Set recording state to false
+                            {
+                                let mut state = recording_state_clone.lock().unwrap();
+                                *state = false;
+                            }
+
+                            // Emit timeout notification to frontend
+                            let _ = app_clone.emit("recording-timeout", ());
+
+                            // Drain remaining chunks and break
+                            let drain_start = std::time::Instant::now();
+                            let mut drained_count = 0;
+                            while drain_start.elapsed() < std::time::Duration::from_millis(500) {
+                                match audio_rx.try_recv() {
+                                    Ok(_) => drained_count += 1,
+                                    Err(_) => break,
+                                }
+                            }
+                            if drained_count > 0 {
+                                DebugLogger::log_info(&format!("Single recording: drained {} remaining chunks from audio channel after timeout", drained_count));
+                            }
+                            break;
+                        }
+
+                        continue; // Keep waiting for more audio
+                    }
+                    Err(RecvTimeoutError::Disconnected) => {
+                        DebugLogger::log_info("STOP_REASON: Audio channel disconnected, ending single recording session");
+                        break;
+                    }
+                };
+
+                // Collect audio data from this chunk
+                if !audio_chunk.data.is_empty() {
+                    sample_rate = audio_chunk.sample_rate;
+                    all_audio_data.extend_from_slice(&audio_chunk.data);
+                }
+            }
+
+            // Process the complete audio recording
+            if !all_audio_data.is_empty() {
+                DebugLogger::log_info(&format!("Single recording complete: {} samples ({:.1}s) at {}Hz",
+                    all_audio_data.len(), all_audio_data.len() as f32 / sample_rate as f32, sample_rate));
+
+                // Convert to WAV format and send to STT service
+                DebugLogger::log_info("Sending complete recording to STT service...");
+
+                match stt_service.transcribe_chunk(all_audio_data, sample_rate, Some("stt_single")).await {
+                    Ok(transcription) => {
+                        DebugLogger::log_info(&format!("STT complete transcription: '{}'", transcription));
+
+                        // IMMEDIATELY emit raw transcription to frontend (don't wait for translation)
+                        let _ = app_clone.emit("transcribed-text", serde_json::json!({
+                            "raw": transcription,
+                            "final": "" // Empty final initially - will be updated when translation completes
+                        }));
+                        DebugLogger::log_info("EMIT: Sent raw transcription immediately to frontend");
+
+                        // Now do translation/correction in background and emit update when done
+                        let final_text = if let Some(ref translation_service) = translation_service {
+                            match translation_service.process_text(
+                                &transcription,
+                                &settings.spoken_language,
+                                &settings.translation_language,
+                                settings.translation_enabled
+                            ).await {
+                                Ok(processed_text) => {
+                                    DebugLogger::log_translation_response(true, Some(&processed_text), None, None);
+
+                                    // Emit updated transcription with final processed text
+                                    let _ = app_clone.emit("transcribed-text", serde_json::json!({
                                         "raw": transcription,
-                                        "final": transcription
+                                        "final": processed_text
                                     }));
-                                    DebugLogger::log_info("EMIT: Sent raw transcription as final (no translation service)");
-                                    
+                                    DebugLogger::log_info("EMIT: Sent final processed text to frontend");
+
+                                    processed_text
+                                },
+                                Err(e) => {
+                                    DebugLogger::log_translation_response(false, None, Some(&e), None);
+                                    DebugLogger::log_pipeline_error("translation", &e);
+                                    let _ = app_clone.emit("processing-error", format!("Translation Error - Using fallback: {}", e));
+
+                                    // Even if translation fails, emit the raw transcription as final
+                                    let _ = app_clone.emit("transcribed-text", serde_json::json!({
+                                        "raw": transcription,
+                                        "final": transcription // Use raw transcription as fallback
+                                    }));
+                                    DebugLogger::log_info("EMIT: Sent raw transcription as fallback final text");
+
                                     transcription.clone()
-                                };
-                                
-                                // In single recording mode, the recording has already stopped, so insert text
-                                if settings_single.text_insertion_enabled {
-                                    DebugLogger::log_info("TEXT_INSERTION: queueing complete transcription for insertion (single mode - recording already stopped)");
-                                    if let Err(e) = text_insertion_tx_single.send(final_text.clone()) {
-                                        DebugLogger::log_pipeline_error("text_insertion", &format!("failed to queue complete transcription: {}", e));
-                                    } else {
-                                        DebugLogger::log_text_insertion(&final_text, true, None);
-                                        DebugLogger::log_info("TEXT_INSERTION: queued complete transcription");
-                                    }
-                                } else {
-                                    DebugLogger::log_info("TEXT_INSERTION: skipped (text insertion disabled)");
                                 }
-                                
-                                // Note: transcribed-text events already emitted above at each stage
-                            },
-                            Err(e) => {
-                                DebugLogger::log_pipeline_error("stt", &format!("STT processing failed: {}", e));
-                                let _ = app_single.emit("processing-error", format!("STT Error: {}", e));
                             }
+                        } else {
+                            // No translation service - just send raw transcription as final
+                            let _ = app_clone.emit("transcribed-text", serde_json::json!({
+                                "raw": transcription,
+                                "final": transcription
+                            }));
+                            DebugLogger::log_info("EMIT: Sent raw transcription as final (no translation service)");
+
+                            transcription.clone()
+                        };
+
+                        // In single recording mode, the recording has already stopped, so insert text
+                        if settings.text_insertion_enabled {
+                            DebugLogger::log_info("TEXT_INSERTION: queueing complete transcription for insertion (single mode - recording already stopped)");
+                            if let Err(e) = text_insertion_tx.send(final_text.clone()) {
+                                DebugLogger::log_pipeline_error("text_insertion", &format!("failed to queue complete transcription: {}", e));
+                            } else {
+                                DebugLogger::log_text_insertion(&final_text, true, None);
+                                DebugLogger::log_info("TEXT_INSERTION: queued complete transcription");
+                            }
+                        } else {
+                            DebugLogger::log_info("TEXT_INSERTION: skipped (text insertion disabled)");
                         }
-                } else {
-                    DebugLogger::log_info("Single recording session ended with no audio data collected");
+
+                        // Note: transcribed-text events already emitted above at each stage
+                    },
+                    Err(e) => {
+                        DebugLogger::log_pipeline_error("stt", &format!("STT processing failed: {}", e));
+                        let _ = app_clone.emit("processing-error", format!("STT Error: {}", e));
+                    }
                 }
-            }).await;
+            } else {
+                DebugLogger::log_info("Single recording session ended with no audio data collected");
+            }
         }
 
         // Common cleanup for both modes
@@ -1091,10 +1106,10 @@ async fn start_recording(
             DebugLogger::log_info("RECORDING_STATE_CHANGE: Set to false in pipeline cleanup (natural termination)");
             DebugLogger::log_info("Recording state set to false");
         }
-        
+
         DebugLogger::log_info("Emitting recording-stopped event to frontend");
         let _ = app.emit("recording-stopped", ());
-        
+
         // Show recording stopped notification (only once per session)
         DebugLogger::log_info("Showing recording stopped notification");
         app.notification()
@@ -1105,14 +1120,10 @@ async fn start_recording(
             .unwrap_or_else(|e| {
                 DebugLogger::log_info(&format!("Failed to show recording stopped notification: {}", e));
             });
-            
+
         DebugLogger::log_info("=== PIPELINE CLEANUP COMPLETE ===");
     });
-    
-    // Store the audio_capture in a way that allows proper cleanup
-    // We need to modify the audio capture to use the recording_state for stopping
-    // For now, we'll implement the stop mechanism in the stop_recording command
-    
+
     Ok(())
 }
 
@@ -1207,65 +1218,127 @@ fn stop_recording(
 // Command to test API connectivity
 #[tauri::command]
 async fn test_stt_api(endpoint: String, api_key: String) -> Result<bool, String> {
-    if endpoint.is_empty() {
-        return Err("API endpoint cannot be empty".to_string());
-    }
-    
-    if api_key.is_empty() {
-        return Err("API key cannot be empty".to_string());
+    DebugLogger::log_info("=== API CONNECTIVITY TEST: test_stt_api() called ===");
+
+    // Input validation using shared function
+    if let Err(e) = validate_api_credentials(&endpoint, &api_key) {
+        DebugLogger::log_info(&format!("API_TEST: Validation failed - {}", e));
+        return Err(e.to_string());
     }
 
-    let client = reqwest::Client::new();
-    
+    DebugLogger::log_info(&format!("API_TEST: Testing connectivity to {}", endpoint));
+
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(15))
+        .build()
+        .map_err(|e| {
+            let error_msg = format!("Failed to create HTTP client: {}", e);
+            DebugLogger::log_info(&format!("API_TEST: Client creation failed - {}", error_msg));
+            error_msg
+        })?;
+
     // Try to test the models endpoint first (common for OpenAI-compatible APIs)
-    let models_url = format!("{}/models", endpoint);
-    
+    let models_url = format!("{}/models", endpoint.trim_end_matches('/'));
+    DebugLogger::log_info(&format!("API_TEST: Attempting to access models endpoint: {}", models_url));
+
     match client
         .get(&models_url)
-        .header("Authorization", format!("Bearer {}", api_key))
-        .timeout(std::time::Duration::from_secs(10))
+        .header("Authorization", format!("Bearer {}", api_key.trim()))
         .send()
         .await
     {
         Ok(response) => {
+            let status = response.status();
+            DebugLogger::log_info(&format!("API_TEST: Models endpoint returned status: {}", status));
+
             if response.status().is_success() {
+                DebugLogger::log_info("API_TEST: Models endpoint accessible - API connectivity confirmed");
                 Ok(true)
-            } else if response.status() == 401 {
-                Err("Unauthorized: Invalid API key".to_string())
-            } else if response.status() == 404 {
+            } else if status == 401 {
+                let error_msg = "Authentication failed: Invalid API key or insufficient permissions";
+                DebugLogger::log_info(&format!("API_TEST: {} (401)", error_msg));
+                Err(error_msg.to_string())
+            } else if status == 403 {
+                let error_msg = "Access forbidden: API key lacks required permissions";
+                DebugLogger::log_info(&format!("API_TEST: {} (403)", error_msg));
+                Err(error_msg.to_string())
+            } else if status == 404 {
                 // Models endpoint might not exist, try a simple health check or audio transcription endpoint
-                let transcription_url = format!("{}/audio/transcriptions", endpoint);
+                DebugLogger::log_info("API_TEST: Models endpoint not found, trying audio transcription endpoint");
+
+                let transcription_url = format!("{}/audio/transcriptions", endpoint.trim_end_matches('/'));
+                DebugLogger::log_info(&format!("API_TEST: Attempting HEAD request to: {}", transcription_url));
+
                 match client
                     .head(&transcription_url)
-                    .header("Authorization", format!("Bearer {}", api_key))
-                    .timeout(std::time::Duration::from_secs(10))
+                    .header("Authorization", format!("Bearer {}", api_key.trim()))
                     .send()
                     .await
                 {
                     Ok(resp) => {
-                        if resp.status().is_success() || resp.status() == 400 || resp.status() == 422 {
+                        let head_status = resp.status();
+                        DebugLogger::log_info(&format!("API_TEST: Audio endpoint HEAD returned status: {}", head_status));
+
+                        if resp.status().is_success() || head_status == 400 || head_status == 422 {
                             // 400/422 is expected for HEAD request without proper audio data
+                            DebugLogger::log_info("API_TEST: Audio transcription endpoint accessible - API connectivity confirmed");
                             Ok(true)
-                        } else if resp.status() == 401 {
-                            Err("Unauthorized: Invalid API key".to_string())
+                        } else if head_status == 401 {
+                            let error_msg = "Authentication failed: Invalid API key or insufficient permissions";
+                            DebugLogger::log_info(&format!("API_TEST: {} (401)", error_msg));
+                            Err(error_msg.to_string())
+                        } else if head_status == 403 {
+                            let error_msg = "Access forbidden: API key lacks required permissions";
+                            DebugLogger::log_info(&format!("API_TEST: {} (403)", error_msg));
+                            Err(error_msg.to_string())
                         } else {
-                            Err(format!("API returned status code: {}", resp.status()))
+                            let error_msg = format!("API endpoint returned unexpected status: {} - {}", head_status, head_status.canonical_reason().unwrap_or("Unknown"));
+                            DebugLogger::log_info(&format!("API_TEST: {}", error_msg));
+                            Err(error_msg)
                         }
                     }
-                    Err(e) => Err(format!("Network error: {}", e))
+                    Err(e) => {
+                        let error_category = if e.is_timeout() {
+                            "timeout"
+                        } else if e.is_connect() {
+                            "connection"
+                        } else {
+                            "network"
+                        };
+                        let error_msg = format!("Failed to connect to audio transcription endpoint ({}): {}", error_category, e);
+                        DebugLogger::log_info(&format!("API_TEST: {}", error_msg));
+                        Err(error_msg)
+                    }
                 }
             } else {
-                Err(format!("API returned status code: {}", response.status()))
+                let error_msg = match status.as_u16() {
+                    429 => "Rate limit exceeded: Too many requests".to_string(),
+                    500..=599 => format!("Server error: API service temporarily unavailable ({})", status),
+                    _ => format!("API returned unexpected status: {} - {}", status, status.canonical_reason().unwrap_or("Unknown"))
+                };
+                DebugLogger::log_info(&format!("API_TEST: {}", error_msg));
+                Err(error_msg)
             }
         }
         Err(e) => {
-            if e.is_timeout() {
-                Err("Request timed out. Check your internet connection and API endpoint.".to_string())
+            let error_category = if e.is_timeout() {
+                "timeout"
             } else if e.is_connect() {
-                Err("Cannot connect to API endpoint. Check the URL and your internet connection.".to_string())
+                "connection"
             } else {
-                Err(format!("Network error: {}", e))
-            }
+                "network"
+            };
+
+            let error_msg = if e.is_timeout() {
+                "Request timed out: Check your internet connection and API endpoint URL".to_string()
+            } else if e.is_connect() {
+                "Cannot connect to API endpoint: Check the URL and your internet connection".to_string()
+            } else {
+                format!("Network error ({}): {}", error_category, e)
+            };
+
+            DebugLogger::log_info(&format!("API_TEST: {}", error_msg));
+            Err(error_msg)
         }
     }
 }
@@ -1275,26 +1348,19 @@ async fn test_stt_api(endpoint: String, api_key: String) -> Result<bool, String>
 async fn validate_settings(settings: serde_json::Value) -> Result<serde_json::Value, String> {
     let mut errors = Vec::new();
 
-    // Validate API endpoint
+    // Validate API endpoint and key using shared function
     if let Some(endpoint) = settings["apiEndpoint"].as_str() {
-        if endpoint.is_empty() {
-            errors.push("API endpoint cannot be empty".to_string());
-        } else if !endpoint.starts_with("http://") && !endpoint.starts_with("https://") {
-            errors.push("API endpoint must start with http:// or https://".to_string());
+        if let Some(api_key) = settings["apiKey"].as_str() {
+            if let Err(e) = validate_api_credentials(endpoint, api_key) {
+                errors.push(e.to_string());
+            } else if api_key.len() < 10 {
+                errors.push("API key seems too short".to_string());
+            }
+        } else {
+            errors.push("API key is required".to_string());
         }
     } else {
         errors.push("API endpoint is required".to_string());
-    }
-
-    // Validate API key
-    if let Some(api_key) = settings["apiKey"].as_str() {
-        if api_key.is_empty() {
-            errors.push("API key cannot be empty".to_string());
-        } else if api_key.len() < 10 {
-            errors.push("API key seems too short".to_string());
-        }
-    } else {
-        errors.push("API key is required".to_string());
     }
 
     // Validate hotkeys
@@ -1547,8 +1613,9 @@ async fn translate_text(
 // New commands for localStorage-based settings
 #[tauri::command]
 async fn load_settings_from_frontend() -> Result<String, String> {
-    // This is a placeholder - the frontend will handle localStorage directly
-    // We just return "ok" to indicate the command exists
+    // This command is a placeholder for frontend localStorage management
+    // Settings are handled entirely by the frontend localStorage system
+    // The backend only handles secure API key storage
     Ok("localStorage".to_string())
 }
 
@@ -1567,18 +1634,34 @@ async fn save_settings_from_frontend(
     translation_enabled: bool,
     debug_logging: bool,
     hands_free_hotkey: String,
-    text_insertion_enabled: bool
+    text_insertion_enabled: bool,
+    audio_chunking_enabled: bool,
+    max_recording_time_minutes: u32,
 ) -> Result<(), String> {
-    // Log the settings being saved (without logging the API key for security)
-    DebugLogger::log_info(&format!("SETTINGS_SAVE: spoken_language={}, translation_language={}, audio_device={}, theme={}, api_endpoint={}, stt_model={}, translation_model={}, api_key_provided={}, auto_mute={}, translation_enabled={}, debug_logging={}, hands_free={}, text_insertion_enabled={}", 
-        spoken_language, translation_language, audio_device, theme, api_endpoint, stt_model, translation_model, !api_key.is_empty(), auto_mute, translation_enabled, debug_logging, hands_free_hotkey, text_insertion_enabled));
+    // Create a new settings instance with the provided values
+    let mut settings = AppSettings {
+        spoken_language,
+        translation_language,
+        audio_device,
+        theme,
+        auto_save: true,
+        api_endpoint,
+        stt_model,
+        translation_model,
+        hotkeys: crate::settings::Hotkeys {
+            hands_free: hands_free_hotkey,
+        },
+        auto_mute,
+        translation_enabled,
+        debug_logging,
+        text_insertion_enabled,
+        audio_chunking_enabled,
+        max_recording_time_minutes,
+    };
 
-    // Store API key securely if provided and not empty
-    // (Note: we now send empty string for security, so API key is stored separately via store_api_key command)
-    if !api_key.is_empty() {
-        let settings = AppSettings::default();
+    // Store API key in secure storage if provided
+    if !api_key.trim().is_empty() {
         settings.store_api_key(&app, api_key)?;
-        DebugLogger::log_info("API key stored securely in backend");
     }
 
     // Re-initialize debug logging with the new state
@@ -1693,13 +1776,12 @@ pub fn run() {
             Arc::new(Mutex::new(cmd_tx)) as AudioManagerHandle
         })
         .invoke_handler(tauri::generate_handler![
-            greet, 
-            start_recording, 
-            stop_recording, 
-            toggle_window, 
-            quit_app, 
-            register_hotkeys, 
-            test_stt_api, 
+            start_recording,
+            stop_recording,
+            toggle_window,
+            quit_app,
+            register_hotkeys,
+            test_stt_api,
             validate_settings,
             store_api_key,
             get_api_key,
@@ -1717,13 +1799,12 @@ pub fn run() {
             translate_text,
             load_settings_from_frontend,
             save_settings_from_frontend,
-            init_debug_logging
-            , get_audio_manager_last_error
-            , clear_audio_manager_last_error
-            , show_recording_timeout_notification
-            , test_hotkey_parsing
-            , show_recording_started_notification
-            , show_recording_stopped_notification
+            init_debug_logging,
+            get_audio_manager_last_error,
+            clear_audio_manager_last_error,
+            show_recording_timeout_notification,
+            show_recording_started_notification,
+            show_recording_stopped_notification
         ])
         .setup(|app| {
             // Initialize debug logging first (disabled by default, will be enabled by frontend)

@@ -109,30 +109,7 @@ impl AppSettings {
         self.get_api_key(app_handle).is_ok()
     }
 
-    /// Get portable data directory - tries local first, falls back to app_data_dir
-    #[allow(dead_code)]
-    fn get_portable_data_dir(app_handle: &AppHandle) -> Result<PathBuf, String> {
-        // Try to get the executable directory first for portable mode
-        if let Ok(exe_path) = std::env::current_exe() {
-            if let Some(exe_dir) = exe_path.parent() {
-                let portable_dir = exe_dir.join("data");
 
-                // Check if we can write to the exe directory (portable mode)
-                if let Ok(_) = std::fs::create_dir_all(&portable_dir) {
-                    if portable_dir.exists() {
-                        return Ok(portable_dir);
-                    }
-                }
-            }
-        }
-
-        // Fallback to app data directory
-        let app_dir = app_handle
-            .path()
-            .app_data_dir()
-            .map_err(|e| e.to_string())?;
-        Ok(app_dir)
-    }
 
     /// Diagnostic helper for debugging API key storage issues
     /// Returns JSON with path, exists, size (bytes) and a masked preview of the key
