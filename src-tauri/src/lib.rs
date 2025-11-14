@@ -1123,7 +1123,7 @@ async fn start_recording(
         let _ = app.notification()
             .builder()
             .title("Processing completed")
-            .body("✍️ Text copied to clipboard")
+            .body("✏️ Text copied to clipboard")
             .show();
 
         // Emit recording-stopped event AFTER transcription has been shown to frontend
