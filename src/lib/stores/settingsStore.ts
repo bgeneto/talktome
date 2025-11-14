@@ -124,7 +124,6 @@ function createSettingsStore() {
             sttModel: persistedSettings.stt_model || settings.sttModel,
             translationModel: persistedSettings.translation_model || settings.translationModel,
             autoMute: persistedSettings.auto_mute !== undefined ? persistedSettings.auto_mute : settings.autoMute,
-            translationEnabled: persistedSettings.translation_enabled !== undefined ? persistedSettings.translation_enabled : settings.translationEnabled,
             debugLogging: persistedSettings.debug_logging !== undefined ? persistedSettings.debug_logging : settings.debugLogging,
             textInsertionEnabled: persistedSettings.text_insertion_enabled !== undefined ? persistedSettings.text_insertion_enabled : settings.textInsertionEnabled,
             maxRecordingTimeMinutes: persistedSettings.max_recording_time_minutes || settings.maxRecordingTimeMinutes,

@@ -52,18 +52,18 @@ fn downsample_audio(input: &[f32], input_rate: u32, target_rate: u32) -> Vec<f32
     if input_rate == target_rate {
         return input.to_vec();
     }
-    
+
     let ratio = input_rate as f32 / target_rate as f32;
     let output_len = (input.len() as f32 / ratio) as usize;
     let mut output = Vec::with_capacity(output_len);
-    
+
     for i in 0..output_len {
         let src_index = (i as f32 * ratio) as usize;
         if src_index < input.len() {
             output.push(input[src_index]);
         }
     }
-    
+
     output
 }
 
@@ -389,7 +389,9 @@ impl AudioCapture {
                         processed
                     } else {
                         // If no noise reducer, just downsample
-                        DebugLogger::log_info("NOISE_REDUCTION: No noise reducer available, downsampling only");
+                        DebugLogger::log_info(
+                            "NOISE_REDUCTION: No noise reducer available, downsampling only",
+                        );
                         downsample_audio(&final_audio, sr, 16000)
                     }
                 };
@@ -398,7 +400,10 @@ impl AudioCapture {
                 let original_samples = final_audio.len();
                 let processed_samples = processed_audio.len();
                 let original_max = final_audio.iter().map(|x| x.abs()).fold(0.0f32, f32::max);
-                let processed_max = processed_audio.iter().map(|x| x.abs()).fold(0.0f32, f32::max);
+                let processed_max = processed_audio
+                    .iter()
+                    .map(|x| x.abs())
+                    .fold(0.0f32, f32::max);
 
                 DebugLogger::log_info(&format!(
                     "NOISE_REDUCTION: Original {} samples (max amplitude: {:.6}), Processed {} samples (max amplitude: {:.6})",
@@ -436,16 +441,20 @@ impl AudioCapture {
                     processed_audio.len(),
                     sr
                 ));
-                
+
                 // Check if the main pipeline is still expecting chunks
                 // (This is a best-effort check - the send could still fail due to race conditions)
                 let chunk = AudioChunk::new(processed_audio, 16000); // Output is always 16kHz after noise reduction
                 let send_result = tx.send(chunk);
                 if send_result.is_ok() {
-                    DebugLogger::log_info("AUDIO_CHUNK_SENT: Successfully sent processed audio chunk to main pipeline");
+                    DebugLogger::log_info(
+                        "AUDIO_CHUNK_SENT: Successfully sent processed audio chunk to main pipeline",
+                    );
                 } else {
                     // This is expected during shutdown - the main pipeline may have closed the receiver
-                    DebugLogger::log_info("AUDIO_CHUNK_SEND_EXPECTED: Main pipeline receiver closed during shutdown (this is normal)");
+                    DebugLogger::log_info(
+                        "AUDIO_CHUNK_SEND_EXPECTED: Main pipeline receiver closed during shutdown (this is normal)",
+                    );
                 }
             } else {
                 DebugLogger::log_info("No audio data recorded");

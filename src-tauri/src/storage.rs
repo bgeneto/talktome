@@ -70,12 +70,18 @@ impl SettingsStore {
 
         store.set(Self::SETTINGS_KEY.to_string(), value);
 
-        store.save().map_err(|e| format!("Failed to sync store: {}", e))?;
+        store
+            .save()
+            .map_err(|e| format!("Failed to sync store: {}", e))?;
 
         Ok(())
     }
 
-    pub fn update_field(app: &AppHandle, field: &str, value: serde_json::Value) -> Result<(), String> {
+    pub fn update_field(
+        app: &AppHandle,
+        field: &str,
+        value: serde_json::Value,
+    ) -> Result<(), String> {
         let mut settings = Self::load(app)?;
 
         match field {

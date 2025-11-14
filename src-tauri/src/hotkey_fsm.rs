@@ -23,7 +23,10 @@ impl HotkeySM {
     }
 
     pub fn get_state(&self) -> Result<RecordingState, String> {
-        self.state.lock().map(|guard| *guard).map_err(|e| e.to_string())
+        self.state
+            .lock()
+            .map(|guard| *guard)
+            .map_err(|e| e.to_string())
     }
 
     pub fn try_toggle(&self) -> Result<Option<RecordingState>, String> {

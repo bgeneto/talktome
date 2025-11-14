@@ -450,6 +450,7 @@ Formatted: ${formatHotkeyFromEvent(e)}
       autoMute: true,
       debugLogging: false,
       textInsertionEnabled: true,
+      maxRecordingTimeMinutes: 2,
     };
     persistSettings(currentSettings);
     // Update hotkeys in the backend
