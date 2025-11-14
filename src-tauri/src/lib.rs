@@ -28,6 +28,7 @@ use debug_logger::DebugLogger;
 mod storage;
 use storage::SettingsStore;
 mod hotkey_fsm;
+use hotkey_fsm::HotkeySM;
 
 // Global state to track registered hotkeys and active recording
 type HotkeyRegistry = Mutex<HashMap<String, String>>;
@@ -37,6 +38,8 @@ type AudioStopSender = Arc<Mutex<Option<std::sync::mpsc::Sender<()>>>>;
 type LastStopTime = Arc<Mutex<Option<std::time::Instant>>>;
 // Track the last hotkey action and when it happened to help debug stop origins
 type LastHotkey = Arc<Mutex<Option<(String, std::time::Instant)>>>;
+// FSM for recording state with debouncing
+type HotkeySMState = Arc<HotkeySM>;
 
 // Commands sent to the single-threaded audio manager which owns the non-Send AudioCapture
 enum AudioManagerCommand {
@@ -301,49 +304,60 @@ async fn register_hotkeys(
         let app_for_emit = app.clone();
         global_shortcut
             .on_shortcut(shortcut, move |app_handle, _sc, ev| {
-                    // Debounce repeated hotkey firings from programmatic input (ms)
-                    let debounce_ms = 150u128;
-                    if let Ok(mut last_hotkey) = app_handle.state::<LastHotkey>().inner().lock() {
-                        if let Some((ref last_action, ref when)) = *last_hotkey {
-                            if last_action == &action_clone && when.elapsed().as_millis() < debounce_ms {
-                                let ts_ms = std::time::SystemTime::now()
-                                    .duration_since(std::time::UNIX_EPOCH)
-                                    .map(|d| d.as_millis())
-                                    .unwrap_or(0);
-                                DebugLogger::log_info(&format!("HOTKEY_DEBOUNCE: action={}, state={:?}, ts_ms={}, last_elapsed={}ms", action_clone, ev.state, ts_ms, when.elapsed().as_millis()));
-                                return;
+                let ts_ms = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_millis())
+                    .unwrap_or(0);
+
+                // Normalize action names to support both camelCase and snake_case
+                let normalized = match action_clone.as_str() {
+                    "handsFree" | "hands_free" => "hands_free",
+                    other => other,
+                };
+
+                match (normalized, ev.state) {
+                    // Hands-free: Only process key press (ignore release)
+                    ("hands_free", ShortcutState::Pressed) => {
+                        // Use FSM to toggle state with debouncing
+                        if let Some(fsm) = app_handle.try_state::<HotkeySMState>() {
+                            match fsm.try_toggle() {
+                                Ok(Some(new_state)) => {
+                                    DebugLogger::log_info(&format!(
+                                        "HOTKEY_FSM_TOGGLE: action=hands_free, new_state={:?}, ts_ms={}",
+                                        new_state, ts_ms
+                                    ));
+                                    let _ = app_for_emit.emit("toggle-recording-from-hotkey", ());
+                                }
+                                Ok(None) => {
+                                    DebugLogger::log_info(&format!(
+                                        "HOTKEY_FSM_DEBOUNCED: action=hands_free, ts_ms={}",
+                                        ts_ms
+                                    ));
+                                }
+                                Err(e) => {
+                                    DebugLogger::log_pipeline_error(
+                                        "hotkey_fsm",
+                                        &format!("FSM error: {}", e),
+                                    );
+                                }
                             }
-                        }
-                        // update last hotkey timestamp for correlation
-                        *last_hotkey = Some((action_clone.clone(), std::time::Instant::now()));
-                    }
-
-                    let ts_ms = std::time::SystemTime::now()
-                        .duration_since(std::time::UNIX_EPOCH)
-                        .map(|d| d.as_millis())
-                        .unwrap_or(0);
-                    DebugLogger::log_info(&format!("HOTKEY_TRIGGER: action={}, state={:?}, ts_ms={}", action_clone, ev.state, ts_ms));
-
-                    // Normalize action names to support both camelCase and snake_case
-                    let normalized = match action_clone.as_str() {
-                        "handsFree" | "hands_free" => "hands_free",
-                        other => other,
-                    };
-
-                    match (normalized, ev.state) {
-                        // Hands-free: Pressed = toggle (ignore release)
-                        ("hands_free", ShortcutState::Pressed) => {
+                        } else {
+                            DebugLogger::log_info("FSM not available, fallback to event emit");
                             let _ = app_for_emit.emit("toggle-recording-from-hotkey", ());
                         }
-                        _ => {
-                            let state = match ev.state { ShortcutState::Pressed => "pressed", ShortcutState::Released => "released" };
-                            let _ = app_for_emit.emit(
-                                "hotkey-triggered",
-                                serde_json::json!({ "action": action_clone, "state": state }),
-                            );
-                        }
                     }
-                })
+                    _ => {
+                        let state = match ev.state {
+                            ShortcutState::Pressed => "pressed",
+                            ShortcutState::Released => "released",
+                        };
+                        let _ = app_for_emit.emit(
+                            "hotkey-triggered",
+                            serde_json::json!({ "action": action_clone, "state": state }),
+                        );
+                    }
+                }
+            })
             .map_err(|e| {
                 format!(
                     "Failed to attach handler for hotkey '{}' (action '{}'): {}",
@@ -409,11 +423,12 @@ async fn show_recording_stopped_notification(
 // Command to start recording
 #[tauri::command]
 async fn start_recording(
-    app: AppHandle, 
+    app: AppHandle,
     recording_state: State<'_, RecordingState>,
     audio_stop_sender: State<'_, AudioStopSender>,
     audio_manager: State<'_, AudioManagerHandle>,
-    
+    fsm: State<'_, HotkeySMState>,
+
     spoken_language: String,
     translation_language: String,
     api_endpoint: String,
@@ -510,6 +525,10 @@ async fn start_recording(
         *state = true;
         DebugLogger::log_info("RECORDING_STATE_CHANGE: Set to true in start_recording (recording started)");
     }
+
+    // Update FSM to Recording state
+    fsm.force_set_state(hotkey_fsm::RecordingState::Recording)
+        .unwrap_or_else(|e| DebugLogger::log_info(&format!("Failed to set FSM to Recording: {}", e)));
 
     // Show "Recording Started" notification
     DebugLogger::log_info("Showing recording started notification");
@@ -1122,10 +1141,11 @@ async fn start_recording(
 // Command to stop recording
 #[tauri::command]
 fn stop_recording(
-    app: AppHandle, 
+    app: AppHandle,
     recording_state: State<'_, RecordingState>,
     audio_stop_sender: State<'_, AudioStopSender>,
-    audio_manager: State<'_, AudioManagerHandle>
+    audio_manager: State<'_, AudioManagerHandle>,
+    fsm: State<'_, HotkeySMState>
 ) -> Result<(), String> {
     // Dump last hotkey info for correlation
     if let Ok(last) = app.state::<LastHotkey>().inner().lock() {
@@ -1184,7 +1204,11 @@ fn stop_recording(
         DebugLogger::log_info("RECORDING_STATE_CHANGE: Set to false in stop_recording command (user/external stop)");
         DebugLogger::log_info("Recording state set to false in stop_recording");
     }
-    
+
+    // Update FSM to Idle state
+    fsm.force_set_state(hotkey_fsm::RecordingState::Idle)
+        .unwrap_or_else(|e| DebugLogger::log_info(&format!("Failed to set FSM to Idle: {}", e)));
+
     // Send stop signal to audio processing task
     {
         let mut audio_stop = audio_stop_sender.inner().lock().map_err(|e| e.to_string())?;
@@ -1628,6 +1652,34 @@ async fn update_persistent_setting(app: AppHandle, field: String, value: serde_j
     Ok(())
 }
 
+#[tauri::command]
+fn get_hotkey_fsm_state(fsm: State<'_, HotkeySMState>) -> Result<String, String> {
+    let state = fsm.get_state()?;
+    let state_str = match state {
+        hotkey_fsm::RecordingState::Idle => "Idle",
+        hotkey_fsm::RecordingState::Recording => "Recording",
+    };
+    Ok(state_str.to_string())
+}
+
+#[tauri::command]
+fn reset_hotkey_fsm(fsm: State<'_, HotkeySMState>) -> Result<(), String> {
+    fsm.force_set_state(hotkey_fsm::RecordingState::Idle)?;
+    fsm.reset_debounce()?;
+    Ok(())
+}
+
+#[tauri::command]
+fn set_hotkey_fsm_recording(fsm: State<'_, HotkeySMState>, recording: bool) -> Result<(), String> {
+    let state = if recording {
+        hotkey_fsm::RecordingState::Recording
+    } else {
+        hotkey_fsm::RecordingState::Idle
+    };
+    fsm.force_set_state(state)?;
+    Ok(())
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -1652,6 +1704,7 @@ pub fn run() {
         .manage(Arc::new(Mutex::new(None)) as AudioStopSender)
     .manage(Arc::new(Mutex::new(None)) as LastStopTime)
         .manage(Arc::new(Mutex::new(None)) as LastHotkey)
+        .manage(Arc::new(HotkeySM::new(150)) as HotkeySMState)
         // Spawn a dedicated single-thread audio manager to own non-Send AudioCapture
         .manage({
             // Create an mpsc channel for sending commands to the manager
@@ -1750,7 +1803,10 @@ pub fn run() {
             show_recording_stopped_notification,
             load_persistent_settings,
             save_persistent_settings,
-            update_persistent_setting
+            update_persistent_setting,
+            get_hotkey_fsm_state,
+            reset_hotkey_fsm,
+            set_hotkey_fsm_recording
         ])
         .setup(|app| {
             // Initialize debug logging first (disabled by default, will be enabled by frontend)
