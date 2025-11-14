@@ -288,28 +288,26 @@
               syncDisplays(); // Show transcribed text immediately
             }
 
-            // Always populate translated text - either from backend processing or as fallback
+            // Only populate translated text when we have actual processed/translated content from backend
             if (final && final.trim()) {
-              // Backend provided processed text (could be translated, corrected, or fallback)
+              // Backend provided processed text - use it
               pushChunkDedup(translatedChunks, final);
-              syncDisplays(); // Update with processed text
+              syncDisplays();
             } else {
-              // No final text from backend - check if client-side translation is needed
+              // No final text from backend yet (STT just completed, translation pending)
+              // Check if client-side translation is needed as backup
               const translationEnabledUI =
                 selectedTargetLang &&
                 selectedTargetLang !== "none" &&
                 selectedTargetLang !== selectedSourceLang;
 
               if (translationEnabledUI && raw) {
-                // Start client-side translation asynchronously (don't wait)
+                // Start client-side translation as fallback (don't populate UI yet)
                 translateText(raw, { append: true }).catch((err) => {
                   console.error("Background translation failed:", err);
                 });
-              } else if (raw) {
-                // No translation enabled - just use raw text as final
-                pushChunkDedup(translatedChunks, raw);
-                syncDisplays();
               }
+              // Note: No else case - don't populate translated text with raw when waiting for backend
             }
             // Note: translatedChunks now contains either translated text OR corrected text
           }

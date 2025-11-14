@@ -1118,10 +1118,6 @@ async fn start_recording(
             DebugLogger::log_info("RECORDING_STATE_CHANGE: Set to false in pipeline cleanup (natural termination)");
             DebugLogger::log_info("Recording state set to false");
         }
-        
-        DebugLogger::log_info("Emitting recording-stopped event to frontend");
-        let _ = app.emit("recording-stopped", {});
-
         // Show notification immediately when processing starts, not when it ends
         DebugLogger::log_info("Showing recording stopped notification IMMEDIATELY");
         let _ = app.notification()
@@ -1129,6 +1125,10 @@ async fn start_recording(
             .title("Recording Stopped")
             .body("⏳ Processing audio...")
             .show();
+
+        // Emit recording-stopped event AFTER transcription has been shown to frontend
+        DebugLogger::log_info("Emitting recording-stopped event to frontend");
+        let _ = app.emit("recording-stopped", {});
             
         DebugLogger::log_info("=== PIPELINE CLEANUP COMPLETE ===");
     });
