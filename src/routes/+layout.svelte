@@ -4,7 +4,7 @@
   import { listen } from "@tauri-apps/api/event";
   import { goto } from "$app/navigation";
   import { page } from "$app/stores";
-  import { settings } from "../lib/stores/settingsStore";
+  import { settings, ensureSettingsLoaded } from "../lib/stores/settingsStore";
 
   let isDarkMode = false;
   let sidebarCollapsed = false;
@@ -78,48 +78,55 @@
   ];
 
   onMount(() => {
-    // Subscribe to settings changes and apply theme
-    const unsubscribe = settings.subscribe((currentSettings) => {
-      if (currentSettings.theme) {
-        applyGlobalTheme(currentSettings.theme);
-      }
+    // Ensure settings are loaded before setting up subscribers
+    ensureSettingsLoaded().then(() => {
+      console.log("Settings fully loaded in layout");
+      
+      // Subscribe to settings changes and apply theme
+      const unsubscribe = settings.subscribe((currentSettings) => {
+        if (currentSettings.theme) {
+          applyGlobalTheme(currentSettings.theme);
+        }
+      });
+
+      // Listen for tray events to show specific pages
+      (async () => {
+        await listen("show-preferences", () => {
+          goto("/preferences");
+        });
+
+        await listen("show-api-settings", () => {
+          goto("/api-settings");
+        });
+
+        await listen("show-language-settings", () => {
+          goto("/language-settings");
+        });
+
+        await listen("show-audio-settings", () => {
+          goto("/audio-settings");
+        });
+
+        await listen("show-about", () => {
+          goto("/about");
+        });
+      })();
+
+      // Update current page based on route
+      page.subscribe(($page) => {
+        const item = navigationItems.find(
+          (item) => item.route === $page.route.id,
+        );
+        currentPage = item ? item.label : "Home";
+      });
+
+      // Cleanup subscription on unmount
+      return () => {
+        unsubscribe();
+      };
+    }).catch((error) => {
+      console.error("Failed to load settings in layout:", error);
     });
-
-    // Listen for tray events to show specific pages
-    (async () => {
-      await listen("show-preferences", () => {
-        goto("/preferences");
-      });
-
-      await listen("show-api-settings", () => {
-        goto("/api-settings");
-      });
-
-      await listen("show-language-settings", () => {
-        goto("/language-settings");
-      });
-
-      await listen("show-audio-settings", () => {
-        goto("/audio-settings");
-      });
-
-      await listen("show-about", () => {
-        goto("/about");
-      });
-    })();
-
-    // Update current page based on route
-    page.subscribe(($page) => {
-      const item = navigationItems.find(
-        (item) => item.route === $page.route.id,
-      );
-      currentPage = item ? item.label : "Home";
-    });
-
-    // Cleanup subscription on unmount
-    return () => {
-      unsubscribe();
-    };
   });
 
   function updateTheme() {

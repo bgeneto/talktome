@@ -54,9 +54,13 @@ impl SettingsStore {
             Some(value) => {
                 let settings = serde_json::from_value::<PersistentSettings>(value)
                     .map_err(|e| format!("Failed to deserialize settings: {}", e))?;
+                crate::debug_logger::DebugLogger::log_info(&format!("Loaded persistent settings from store: spoken_language={}, translation_language={}", settings.spoken_language, settings.translation_language));
                 Ok(settings)
             }
-            None => Ok(PersistentSettings::default()),
+            None => {
+                crate::debug_logger::DebugLogger::log_info("No persistent settings found in store, using defaults");
+                Ok(PersistentSettings::default())
+            }
         }
     }
 
@@ -74,6 +78,7 @@ impl SettingsStore {
             .save()
             .map_err(|e| format!("Failed to sync store: {}", e))?;
 
+        crate::debug_logger::DebugLogger::log_info(&format!("Saved persistent settings to store: spoken_language={}, translation_language={}", settings.spoken_language, settings.translation_language));
         Ok(())
     }
 

@@ -32,14 +32,7 @@
       "csp": null
     }
   },
-  "plugins": {
-    "store": {
-      "allow-load": true,
-      "allow-save": true,
-      "allow-delete": true,
-      "allow-clear": true
-    }
-  },
+  "plugins": {},
   "bundle": {
     "active": true,
     "targets": "all",

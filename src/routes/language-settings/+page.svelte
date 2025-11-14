@@ -12,7 +12,6 @@
 
   let sourceLanguage = "auto";
   let targetLanguage = "none";
-  let quickAccessLanguages: string[] = [];
   let saveSuccess = false;
   let isLoading = true;
   let isInitialized = false;
@@ -46,7 +45,6 @@
     const currentSettings = get(settings);
     sourceLanguage = currentSettings.spokenLanguage;
     targetLanguage = currentSettings.translationLanguage;
-    quickAccessLanguages = currentSettings.quickAccessLanguages ?? [];
     isLoading = false;
 
     console.log("Loaded settings on mount:", {
@@ -79,7 +77,6 @@
     console.log("Saving language settings...", {
       sourceLanguage,
       targetLanguage,
-      quickAccessLanguages,
     });
 
     try {
@@ -111,20 +108,6 @@
         (window as any).setLanguageSettingsSaving(false);
       }
     }
-  }
-
-  function addQuickAccess(languageCode: string) {
-    if (!quickAccessLanguages.includes(languageCode)) {
-      quickAccessLanguages = [...quickAccessLanguages, languageCode];
-      settings.setQuickAccessLanguages(quickAccessLanguages);
-    }
-  }
-
-  function removeQuickAccess(languageCode: string) {
-    quickAccessLanguages = quickAccessLanguages.filter(
-      (code) => code !== languageCode
-    );
-    settings.setQuickAccessLanguages(quickAccessLanguages);
   }
 
   function getLanguageByCode(code: string): Language {
@@ -195,75 +178,6 @@
               </option>
             {/each}
           </select>
-        </div>
-      </div>
-    </div>
-  </section>
-
-  <!-- Quick Access Languages -->
-  <section>
-    <h3 class="text-lg font-medium text-gray-900 dark:text-white mb-4">
-      Quick Access Languages
-    </h3>
-    <div
-      class="bg-white dark:bg-gray-800 rounded-lg border border-gray-200 dark:border-gray-700 p-6"
-    >
-      <p class="text-sm text-gray-600 dark:text-gray-400 mb-4">
-        Select only the languages you use frequently for quick access.
-      </p>
-
-      <!-- Current Quick Access -->
-      <div class="mb-4">
-        <h4 class="text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">
-          Current Quick Access
-        </h4>
-        <div class="flex flex-wrap gap-2">
-          {#each quickAccessLanguages as languageCode}
-            {@const language = getLanguageByCode(languageCode)}
-            <div
-              class="inline-flex items-center bg-blue-100 dark:bg-blue-900 text-blue-800 dark:text-blue-200 px-3 py-1 rounded-full text-sm"
-            >
-              <span class="mr-1">{language.flag}</span>
-              <span class="mr-2">{language.name}</span>
-              <button
-                on:click={() => removeQuickAccess(languageCode)}
-                class="text-blue-600 dark:text-blue-400 hover:text-blue-800 dark:hover:text-blue-200"
-                aria-label="Remove {language.name} from quick access"
-              >
-                <svg
-                  class="w-3 h-3"
-                  fill="none"
-                  stroke="currentColor"
-                  viewBox="0 0 24 24"
-                >
-                  <path
-                    stroke-linecap="round"
-                    stroke-linejoin="round"
-                    stroke-width="2"
-                    d="M6 18L18 6M6 6l12 12"
-                  />
-                </svg>
-              </button>
-            </div>
-          {/each}
-        </div>
-      </div>
-
-      <!-- Add Languages -->
-      <div>
-        <h4 class="text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">
-          Add Language
-        </h4>
-        <div class="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 gap-2">
-          {#each languages.filter((lang) => lang.code !== "auto" && lang.code !== "none" && !quickAccessLanguages.includes(lang.code)) as language}
-            <button
-              on:click={() => addQuickAccess(language.code)}
-              class="flex items-center px-3 py-2 text-sm border border-gray-300 dark:border-gray-600 rounded-md hover:bg-gray-50 dark:hover:bg-gray-700 text-gray-700 dark:text-gray-300"
-            >
-              <span class="mr-2">{language.flag}</span>
-              <span class="truncate">{language.name}</span>
-            </button>
-          {/each}
         </div>
       </div>
     </div>

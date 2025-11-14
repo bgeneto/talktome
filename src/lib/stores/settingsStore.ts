@@ -18,7 +18,6 @@ interface Settings {
   textInsertionEnabled: boolean;
   audioChunkingEnabled: boolean;
   maxRecordingTimeMinutes: number;
-  quickAccessLanguages: string[];
   vad: {
     speechThreshold: number; // Energy threshold for speech detection
     silenceThreshold: number; // Energy threshold for silence
@@ -46,7 +45,6 @@ const defaultSettings: Settings = {
   textInsertionEnabled: true,
   audioChunkingEnabled: false, // Default to false
   maxRecordingTimeMinutes: 2, // Default to 5 minutes for safety
-  quickAccessLanguages: [],
   vad: {
     speechThreshold: 0.001, // Sensitive for real-time
     silenceThreshold: 0.0005, // Low silence threshold
@@ -169,6 +167,12 @@ function createSettingsStore() {
   
   // Load settings from Tauri persistent store on initialization
   loadPersistentSettings();
+  
+  // Export a function to ensure settings are fully loaded (for initialization)
+  const ensureSettingsLoaded = async () => {
+    await loadPersistentSettings();
+    await loadApiKeyFromBackend();
+  };
 
   // Create syncToBackend function that can be called by setters
   const syncToBackend = async () => {
@@ -265,18 +269,6 @@ function createSettingsStore() {
         setTimeout(() => {
           syncToBackend();
         }, 0);
-        return newSettings;
-      });
-    },
-    setQuickAccessLanguages: (languages: string[]) => {
-      update((settings) => {
-        const newSettings = { ...settings, quickAccessLanguages: languages };
-        // SECURITY: Never store API key in localStorage
-        const settingsForLocalStorage = { ...newSettings, apiKey: "" };
-        localStorage.setItem(
-          "talktome-settings",
-          JSON.stringify(settingsForLocalStorage)
-        );
         return newSettings;
       });
     },
@@ -753,7 +745,11 @@ function createSettingsStore() {
 
     // Load API key from backend
     loadApiKeyFromBackend,
+
+    // Ensure settings are fully loaded
+    ensureSettingsLoaded,
   };
 }
 
 export const settings = createSettingsStore();
+export const { ensureSettingsLoaded } = settings;

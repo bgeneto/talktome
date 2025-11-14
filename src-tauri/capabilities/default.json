@@ -8,6 +8,10 @@
     "opener:default",
     "core:tray:default",
     "core:menu:default",
-    "notification:default"
+    "notification:default",
+    "store:allow-load",
+    "store:allow-save",
+    "store:allow-delete",
+    "store:allow-clear"
   ]
 }
