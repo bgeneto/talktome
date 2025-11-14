@@ -15,6 +15,7 @@
   let isTestingApi = false;
   let isLoadingModels = false;
   let isLoadingTranslationModels = false;
+  let showApiKey = false;
   let availableModels: string[] = [];
   let availableTranslationModels: string[] = [
     "gpt-4",
@@ -46,16 +47,25 @@
   let isDiagnosing = false;
   let diagnosticError: string | null = null;
 
-  onMount(() => {
+  onMount(async () => {
+    // Ensure settings are fully loaded from persistent store before using them
+    await settings.ensureSettingsLoaded();
+    console.log("Settings fully loaded, now subscribing");
+    
     // Subscribe to settings changes
     const unsubscribe = settings.subscribe((s) => {
+      console.log("API Settings page - settings updated from store:", {
+        apiEndpoint: s.apiEndpoint,
+        sttModel: s.sttModel,
+        translationModel: s.translationModel,
+      });
       currentSettings = {
         apiEndpoint: s.apiEndpoint || "https://api.openai.com/v1",
         apiKey: s.apiKey || "",
         sttModel: s.sttModel || "whisper-large-v3",
         translationModel: s.translationModel || "gpt-3.5-turbo",
       };
-      console.log("Settings updated:", {
+      console.log("Current settings updated:", {
         translationModel: currentSettings.translationModel,
         availableTranslationModels: availableTranslationModels.length,
       });
@@ -161,34 +171,31 @@
 
   async function persistSettings(updated: Partial<typeof currentSettings>) {
     console.log("persistSettings called with:", updated);
-    const merged = { ...get(settings), ...updated };
-    localStorage.setItem("talktome-settings", JSON.stringify(merged));
-    settings.set(merged as any);
-
-    if (updated.hasOwnProperty("apiEndpoint")) {
-      settings.setApiEndpoint(updated.apiEndpoint!);
-    }
-
-    if (updated.hasOwnProperty("apiKey")) {
-      try {
-        await settings.setApiKey(updated.apiKey!);
-      } catch (error) {
-        console.error("Failed to persist API key:", error);
-        if (error instanceof Error) {
-          throw new Error(`Failed to save API key: ${error.message}`);
-        } else {
-          throw new Error("Failed to save API key: Unknown error");
-        }
+    
+    try {
+      // Call individual setters which handle localStorage and backend sync
+      if (updated.hasOwnProperty("apiEndpoint")) {
+        settings.setApiEndpoint(updated.apiEndpoint!);
       }
-    }
 
-    if (updated.hasOwnProperty("sttModel")) {
-      settings.setSttModel(updated.sttModel!);
-    }
+      if (updated.hasOwnProperty("apiKey")) {
+        await settings.setApiKey(updated.apiKey!);
+      }
 
-    if (updated.hasOwnProperty("translationModel")) {
-      console.log("Setting translation model to:", updated.translationModel);
-      settings.setTranslationModel(updated.translationModel!);
+      if (updated.hasOwnProperty("sttModel")) {
+        settings.setSttModel(updated.sttModel!);
+      }
+
+      if (updated.hasOwnProperty("translationModel")) {
+        console.log("Setting translation model to:", updated.translationModel);
+        settings.setTranslationModel(updated.translationModel!);
+      }
+
+      // Give setters time to complete their async operations
+      await new Promise(resolve => setTimeout(resolve, 100));
+    } catch (error) {
+      console.error("Failed to persist settings:", error);
+      throw error;
     }
   }
 
@@ -338,8 +345,54 @@
           >
             API Key
           </label>
+          <div class="flex items-center justify-end mb-2">
+            <button
+              on:click={() => (showApiKey = !showApiKey)}
+              class="px-3 py-1 text-xs bg-gray-100 dark:bg-gray-700 text-gray-600 dark:text-gray-300 rounded hover:bg-gray-200 dark:hover:bg-gray-600 transition-colors flex items-center"
+              type="button"
+              title={showApiKey ? "Hide API key" : "Show API key"}
+            >
+              {#if showApiKey}
+                <svg
+                  class="w-3 h-3 mr-1"
+                  fill="none"
+                  stroke="currentColor"
+                  viewBox="0 0 24 24"
+                >
+                  <path
+                    stroke-linecap="round"
+                    stroke-linejoin="round"
+                    stroke-width="2"
+                    d="M13.875 18.825A10.05 10.05 0 0112 19c-4.478 0-8.268-2.943-9.543-7a9.97 9.97 0 011.563-4.803m5.596-3.856a3.375 3.375 0 11-6.75 0 3.375 3.375 0 016.75 0M15 12a3 3 0 11-6 0 3 3 0 016 0z"
+                  />
+                </svg>
+                Hide
+              {:else}
+                <svg
+                  class="w-3 h-3 mr-1"
+                  fill="none"
+                  stroke="currentColor"
+                  viewBox="0 0 24 24"
+                >
+                  <path
+                    stroke-linecap="round"
+                    stroke-linejoin="round"
+                    stroke-width="2"
+                    d="M15 12a3 3 0 11-6 0 3 3 0 016 0z"
+                  />
+                  <path
+                    stroke-linecap="round"
+                    stroke-linejoin="round"
+                    stroke-width="2"
+                    d="M2.458 12C3.732 7.943 7.523 5 12 5c4.478 0 8.268 2.943 9.542 7-1.274 4.057-5.064 7-9.542 7-4.477 0-8.268-2.943-9.542-7z"
+                  />
+                </svg>
+                Show
+              {/if}
+            </button>
+          </div>
           <input
-            type="password"
+            type={showApiKey ? "text" : "password"}
             id="apiKey"
             bind:value={currentSettings.apiKey}
             placeholder="Enter your API key"
