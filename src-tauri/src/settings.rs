@@ -1,9 +1,15 @@
 use serde::{Deserialize, Serialize};
-// std::fs was used by legacy file-based API key handling which has been removed
-use keyring::Entry;
 use serde_json::json;
+use keyring::Entry;
 use std::path::PathBuf;
 use tauri::{AppHandle, Manager};
+use tauri_plugin_store::{StoreBuilder, StoreExt};
+use serde_json::Value;
+
+/// Helper function to convert JSON value to u64
+fn as_u64(v: &Value) -> Option<u64> {
+    v.as_u64()
+}
 
 #[derive(Serialize, Deserialize, Clone)]
 pub struct AppSettings {
@@ -23,7 +29,7 @@ pub struct AppSettings {
     pub audio_chunking_enabled: bool,
     pub max_recording_time_minutes: u32,
     // SECURITY: API key is NEVER stored in this struct or localStorage
-    // It's handled separately via secure file storage (backend only)
+    // It's handled separately via secure storage (backend only)
     // Frontend stores it only in memory during runtime
 }
 
@@ -57,8 +63,96 @@ impl Default for AppSettings {
 }
 
 impl AppSettings {
-    // Note: load() and save() methods removed - now using localStorage-only approach
-    // AppSettings struct is kept for internal backend operations like tray menu updates
+    /// Load settings from persistent Tauri store
+    pub fn load(app_handle: &AppHandle) -> Result<Self, String> {
+        let store = StoreBuilder::new(app_handle, ".settings.dat").build();
+
+        let settings = Self::default();
+
+        // Load each field from store with fallback to default
+        let mut loaded_settings = Self {
+            spoken_language: store.get("spoken_language")
+                .and_then(|v| v.as_str().map(|s| s.to_string()))
+                .unwrap_or_else(|| settings.spoken_language),
+            translation_language: store.get("translation_language")
+                .and_then(|v| v.as_str().map(|s| s.to_string()))
+                .unwrap_or_else(|| settings.translation_language),
+            audio_device: store.get("audio_device")
+                .and_then(|v| v.as_str().map(|s| s.to_string()))
+                .unwrap_or_else(|| settings.audio_device),
+            theme: store.get("theme")
+                .and_then(|v| v.as_str().map(|s| s.to_string()))
+                .unwrap_or_else(|| settings.theme),
+            auto_save: store.get("auto_save")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(settings.auto_save),
+            api_endpoint: store.get("api_endpoint")
+                .and_then(|v| v.as_str().map(|s| s.to_string()))
+                .unwrap_or_else(|| settings.api_endpoint),
+            stt_model: store.get("stt_model")
+                .and_then(|v| v.as_str().map(|s| s.to_string()))
+                .unwrap_or_else(|| settings.stt_model),
+            translation_model: store.get("translation_model")
+                .and_then(|v| v.as_str().map(|s| s.to_string()))
+                .unwrap_or_else(|| settings.translation_model),
+            hotkeys: Hotkeys {
+                hands_free: store.get("hotkeys_hands_free")
+                    .and_then(|v| v.as_str().map(|s| s.to_string()))
+                    .unwrap_or_else(|| settings.hotkeys.hands_free),
+            },
+            auto_mute: store.get("auto_mute")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(settings.auto_mute),
+            translation_enabled: store.get("translation_enabled")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(settings.translation_enabled),
+            debug_logging: store.get("debug_logging")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(settings.debug_logging),
+            text_insertion_enabled: store.get("text_insertion_enabled")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(settings.text_insertion_enabled),
+            audio_chunking_enabled: store.get("audio_chunking_enabled")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(settings.audio_chunking_enabled),
+            max_recording_time_minutes: store.get("max_recording_time_minutes")
+                .and_then(|v| as_u64(v))
+                .unwrap_or(settings.max_recording_time_minutes as u64) as u32,
+        };
+
+        // Always force audio_chunking_enabled to false for reliability
+        loaded_settings.audio_chunking_enabled = false;
+
+        Ok(loaded_settings)
+    }
+
+    /// Save settings to persistent Tauri store
+    pub fn save(&self, app_handle: &AppHandle) -> Result<(), String> {
+        let store = StoreBuilder::new(app_handle, ".settings.dat").build();
+
+        // Save each field to store
+        store.insert("spoken_language", self.spoken_language.clone())?;
+        store.insert("translation_language", self.translation_language.clone())?;
+        store.insert("audio_device", self.audio_device.clone())?;
+        store.insert("theme", self.theme.clone())?;
+        store.insert("auto_save", self.auto_save)?;
+        store.insert("api_endpoint", self.api_endpoint.clone())?;
+        store.insert("stt_model", self.stt_model.clone())?;
+        store.insert("translation_model", self.translation_model.clone())?;
+        store.insert("hotkeys_hands_free", self.hotkeys.hands_free.clone())?;
+        store.insert("auto_mute", self.auto_mute)?;
+        store.insert("translation_enabled", self.translation_enabled)?;
+        store.insert("debug_logging", self.debug_logging)?;
+        store.insert("text_insertion_enabled", self.text_insertion_enabled)?;
+        // Always save audio_chunking_enabled as false for reliability
+        store.insert("audio_chunking_enabled", false)?;
+        store.insert("max_recording_time_minutes", self.max_recording_time_minutes)?;
+
+        // Save the store to disk
+        store.save()?;
+
+        Ok(())
+    }
 
     /// Get API key from secure storage
     pub fn get_api_key(&self, _app_handle: &AppHandle) -> Result<String, String> {
@@ -164,5 +258,73 @@ impl AppSettings {
                 "exists": false
             })),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_default_settings() {
+        let settings = AppSettings::default();
+
+        // Test that default settings are as expected
+        assert_eq!(settings.spoken_language, "auto");
+        assert_eq!(settings.translation_language, "none");
+        assert_eq!(settings.audio_device, "default");
+        assert_eq!(settings.api_endpoint, "https://api.openai.com/v1");
+        assert_eq!(settings.stt_model, "whisper-large-v3");
+        assert_eq!(settings.translation_model, "gpt-3.5-turbo");
+        assert_eq!(settings.hotkeys.hands_free, "Ctrl+Shift+Space");
+        assert_eq!(settings.auto_mute, true);
+        assert_eq!(settings.translation_enabled, false);
+        assert_eq!(settings.debug_logging, false);
+        assert_eq!(settings.text_insertion_enabled, true);
+        assert_eq!(settings.audio_chunking_enabled, false); // Should always be false
+        assert_eq!(settings.max_recording_time_minutes, 5);
+    }
+
+    #[test]
+    fn test_api_key_field_not_serialized() {
+        let settings = AppSettings::default();
+
+        // Test that API key is not included in the main struct serialization
+        let serialized = serde_json::to_string(&settings).unwrap();
+
+        // The API key should not be a field in the main settings struct
+        // (It's handled separately via secure storage)
+        assert!(!serialized.contains("api_key"));
+    }
+
+    #[test]
+    fn test_hotkey_serialization() {
+        let settings = AppSettings::default();
+        let hotkeys = settings.hotkeys;
+
+        assert_eq!(hotkeys.hands_free, "Ctrl+Shift+Space");
+
+        // Test serialization of hotkeys
+        let serialized = serde_json::to_string(&hotkeys).unwrap();
+        assert!(serialized.contains("hands_free"));
+        assert!(serialized.contains("Ctrl+Shift+Space"));
+    }
+
+    #[test]
+    fn test_settings_json_roundtrip() {
+        let original = AppSettings::default();
+
+        // Serialize to JSON
+        let json = serde_json::to_string(&original).unwrap();
+
+        // Deserialize back from JSON
+        let deserialized: AppSettings = serde_json::from_str(&json).unwrap();
+
+        // Test that all fields match
+        assert_eq!(original.spoken_language, deserialized.spoken_language);
+        assert_eq!(original.translation_language, deserialized.translation_language);
+        assert_eq!(original.audio_device, deserialized.audio_device);
+        assert_eq!(original.hotkeys.hands_free, deserialized.hotkeys.hands_free);
+        assert_eq!(original.audio_chunking_enabled, deserialized.audio_chunking_enabled);
     }
 }

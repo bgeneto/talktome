@@ -262,12 +262,12 @@ async fn register_hotkeys(
 ) -> Result<(), String> {
     let global_shortcut = app.global_shortcut();
     DebugLogger::log_info(&format!("register_hotkeys called, hotkeys_count={}", hotkeys.len()));
-    
+
     // Log each hotkey being registered
     for (action, hotkey_str) in &hotkeys {
         DebugLogger::log_info(&format!("Attempting to register hotkey: action='{}', hotkey='{}'", action, hotkey_str));
     }
-    
+
     // Unregister existing hotkeys
     {
         let mut reg = registry.lock().unwrap();
@@ -278,69 +278,38 @@ async fn register_hotkeys(
         }
         reg.clear();
     }
-    
+
     // Register new hotkeys
     for (action, hotkey_str) in &hotkeys {
         if hotkey_str.is_empty() {
             continue;
         }
-        
+
         let shortcut = parse_hotkey(hotkey_str).map_err(|e| {
             let error_msg = format!("Failed to parse hotkey '{}' for action '{}': {}", hotkey_str, action, e);
             DebugLogger::log_info(&error_msg);
             error_msg
         })?;
-        
+
         DebugLogger::log_info(&format!("Successfully parsed hotkey '{}' for action '{}': {:?}", hotkey_str, action, shortcut));
-        
+
         // Register handler to emit an event when the shortcut is triggered
         let action_clone = action.clone();
         let app_for_emit = app.clone();
         global_shortcut
             .on_shortcut(shortcut, move |app_handle, _sc, ev| {
-                    // Debounce repeated hotkey firings from programmatic input (ms)
-                    let debounce_ms = 150u128;
-                    if let Ok(mut last_hotkey) = app_handle.state::<LastHotkey>().inner().lock() {
-                        if let Some((ref last_action, ref when)) = *last_hotkey {
-                            if last_action == &action_clone && when.elapsed().as_millis() < debounce_ms {
-                                let ts_ms = std::time::SystemTime::now()
-                                    .duration_since(std::time::UNIX_EPOCH)
-                                    .map(|d| d.as_millis())
-                                    .unwrap_or(0);
-                                DebugLogger::log_info(&format!("HOTKEY_DEBOUNCE: action={}, state={:?}, ts_ms={}, last_elapsed={}ms", action_clone, ev.state, ts_ms, when.elapsed().as_millis()));
-                                return;
-                            }
-                        }
-                        // update last hotkey timestamp for correlation
-                        *last_hotkey = Some((action_clone.clone(), std::time::Instant::now()));
+                // Only handle Pressed events for deterministic behavior
+                match ev.state {
+                    ShortcutState::Pressed => {
+                        // Implement state machine for hotkey handling
+                        handle_hotkey_press(app_handle, &action_clone);
                     }
-
-                    let ts_ms = std::time::SystemTime::now()
-                        .duration_since(std::time::UNIX_EPOCH)
-                        .map(|d| d.as_millis())
-                        .unwrap_or(0);
-                    DebugLogger::log_info(&format!("HOTKEY_TRIGGER: action={}, state={:?}, ts_ms={}", action_clone, ev.state, ts_ms));
-
-                    // Normalize action names to support both camelCase and snake_case
-                    let normalized = match action_clone.as_str() {
-                        "handsFree" | "hands_free" => "hands_free",
-                        other => other,
-                    };
-
-                    match (normalized, ev.state) {
-                        // Hands-free: Pressed = toggle (ignore release)
-                        ("hands_free", ShortcutState::Pressed) => {
-                            let _ = app_for_emit.emit("toggle-recording-from-hotkey", ());
-                        }
-                        _ => {
-                            let state = match ev.state { ShortcutState::Pressed => "pressed", ShortcutState::Released => "released" };
-                            let _ = app_for_emit.emit(
-                                "hotkey-triggered",
-                                serde_json::json!({ "action": action_clone, "state": state }),
-                            );
-                        }
+                    ShortcutState::Released => {
+                        // Ignore release events to avoid duplicate triggers
+                        DebugLogger::log_info(&format!("HOTKEY_RELEASE_IGNORED: action={}", action_clone));
                     }
-                })
+                }
+            })
             .map_err(|e| {
                 format!(
                     "Failed to attach handler for hotkey '{}' (action '{}'): {}",
@@ -348,14 +317,80 @@ async fn register_hotkeys(
                 )
             })?;
     }
-    
+
     // Update registry
     {
         let mut reg = registry.lock().unwrap();
         *reg = hotkeys;
     }
-    
+
     Ok(())
+}
+
+/// Deterministic hotkey press handler with state machine
+fn handle_hotkey_press(app_handle: &AppHandle, action: &str) {
+    // Debounce with 200ms to prevent rapid duplicate triggers
+    let debounce_ms = 200u128;
+
+    // Check if we should debounce this hotkey press
+    if let Ok(mut last_hotkey) = app_handle.state::<LastHotkey>().inner().lock() {
+        if let Some((ref last_action, ref when)) = *last_hotkey {
+            if last_action == action && when.elapsed().as_millis() < debounce_ms {
+                let ts_ms = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_millis())
+                    .unwrap_or(0);
+                DebugLogger::log_info(&format!("HOTKEY_DEBOUNCE: action={}, ts_ms={}, last_elapsed={}ms", action, ts_ms, when.elapsed().as_millis()));
+                return;
+            }
+        }
+        // Update last hotkey timestamp for correlation
+        *last_hotkey = Some((action.to_string(), std::time::Instant::now()));
+    }
+
+    let ts_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis())
+        .unwrap_or(0);
+    DebugLogger::log_info(&format!("HOTKEY_PRESSED: action={}, ts_ms={}", action, ts_ms));
+
+    // Normalize action names to support both camelCase and snake_case
+    let normalized_action = match action {
+        "handsFree" | "hands_free" => "hands_free",
+        other => other,
+    };
+
+    match normalized_action {
+        "hands_free" => {
+            // Get current recording state deterministically
+            let is_recording = if let Ok(recording_state) = app_handle.state::<RecordingState>().inner().lock() {
+                *recording_state
+            } else {
+                DebugLogger::log_info("Failed to get recording state, assuming not recording");
+                false
+            };
+
+            DebugLogger::log_info(&format!("HOTKEY_STATE_MACHINE: current_recording_state={}", is_recording));
+
+            // Toggle recording state deterministically
+            if is_recording {
+                DebugLogger::log_info("HOTKEY_STATE_MACHINE: Triggering stop recording");
+                // Emit stop event
+                let _ = app_handle.emit("stop-recording-from-hotkey", ());
+            } else {
+                DebugLogger::log_info("HOTKEY_STATE_MACHINE: Triggering start recording");
+                // Emit start event
+                let _ = app_handle.emit("start-recording-from-hotkey", ());
+            }
+        }
+        _ => {
+            DebugLogger::log_info(&format!("HOTKEY_UNKNOWN_ACTION: action={}", action));
+            let _ = app_handle.emit(
+                "hotkey-triggered",
+                serde_json::json!({ "action": action, "state": "pressed" }),
+            );
+        }
+    }
 }
 
 // Command to show recording started notification
@@ -1597,11 +1632,27 @@ async fn init_debug_logging(app: AppHandle, enabled: bool) -> Result<(), String>
 #[tauri::command]
 async fn show_recording_timeout_notification(app: AppHandle, max_time_minutes: u32) -> Result<(), String> {
     DebugLogger::log_info(&format!("Recording stopped due to maximum time limit of {} minutes", max_time_minutes));
-    
+
     // Emit event to frontend to show tray notification
     app.emit("show-recording-timeout-notification", max_time_minutes)
         .map_err(|e| format!("Failed to emit timeout notification event: {}", e))?;
-    
+
+    Ok(())
+}
+
+// Load settings from persistent store
+#[tauri::command]
+async fn load_persistent_settings(app: AppHandle) -> Result<AppSettings, String> {
+    DebugLogger::log_info("Loading settings from persistent store");
+    AppSettings::load(&app)
+}
+
+// Save settings to persistent store
+#[tauri::command]
+async fn save_persistent_settings(app: AppHandle, settings: AppSettings) -> Result<(), String> {
+    DebugLogger::log_info("Saving settings to persistent store");
+    settings.save(&app)?;
+    DebugLogger::log_info("Settings successfully saved to persistent store");
     Ok(())
 }
 
@@ -1611,13 +1662,14 @@ pub fn run() {
     .plugin(tauri_plugin_opener::init())
     .plugin(tauri_plugin_global_shortcut::Builder::new().build())
     .plugin(tauri_plugin_notification::init())
+    .plugin(tauri_plugin_store::Builder::new().build())
         // Register Stronghold plugin for encrypted at-rest storage (JS guest APIs available)
-        .setup(|app| {
+        .setup(|app| -> Result<(), Box<dyn std::error::Error>> {
             // derive salt path for argon2 KDF used by the plugin
             let salt_path = app
                 .path()
                 .app_local_data_dir()
-                .expect("could not resolve app local data path")
+                .map_err(|e| format!("Failed to resolve app local data path: {}", e))?
                 .join("salt.txt");
             // register the plugin using the Builder::with_argon2 helper
             let _ = app.handle().plugin(tauri_plugin_stronghold::Builder::with_argon2(&salt_path).build());
@@ -1724,6 +1776,8 @@ pub fn run() {
             , test_hotkey_parsing
             , show_recording_started_notification
             , show_recording_stopped_notification
+            , load_persistent_settings
+            , save_persistent_settings
         ])
         .setup(|app| {
             // Initialize debug logging first (disabled by default, will be enabled by frontend)
@@ -1760,9 +1814,12 @@ pub fn run() {
             };
 
             // Build the system tray
+            let icon = app.default_window_icon()
+                .cloned()
+                .ok_or_else(|| "No default window icon found".to_string())?;
             let _tray = TrayIconBuilder::with_id("main-tray")
                 .tooltip("TalkToMe - Voice to Text with Translation")
-                .icon(app.default_window_icon().unwrap().clone())
+                .icon(icon)
                 .menu(&tray_menu)
                 .show_menu_on_left_click(false)
                 .on_menu_event(move |app, event| {
@@ -1861,5 +1918,86 @@ pub fn run() {
             Ok(())
         })
         .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_hotkey_parsing() {
+        // Test various hotkey format parsing
+        assert!(parse_hotkey("Ctrl+Shift+Space").is_ok());
+        assert!(parse_hotkey("Alt+F4").is_ok());
+        assert!(parse_hotkey("Ctrl+C").is_ok());
+        assert!(parse_hotkey("Win+R").is_ok());
+        assert!(parse_hotkey("Meta+S").is_ok());
+        assert!(parse_hotkey("F5").is_ok());
+        assert!(parse_hotkey("Escape").is_ok());
+        assert!(parse_hotkey("Enter").is_ok());
+
+        // Test invalid hotkeys
+        assert!(parse_hotkey("").is_err());
+        assert!(parse_hotkey("Invalid+Key").is_err());
+        assert!(parse_hotkey("Ctrl+").is_err());
+        assert!(parse_hotkey("+Shift").is_err());
+    }
+
+    #[test]
+    fn test_hotkey_parsing_case_insensitive() {
+        // Test that hotkey parsing is case insensitive
+        let ctrl_shift_space = parse_hotkey("Ctrl+Shift+Space").unwrap();
+        let ctrl_shift_space_lower = parse_hotkey("ctrl+shift+space").unwrap();
+        let ctrl_shift_space_mixed = parse_hotkey("CtRl+ShIfT+SpAcE").unwrap();
+
+        // All should parse successfully
+        assert!(parse_hotkey("Ctrl+Shift+Space").is_ok());
+        assert!(parse_hotkey("ctrl+shift+space").is_ok());
+        assert!(parse_hotkey("CtRl+ShIfT+SpAcE").is_ok());
+    }
+
+    #[test]
+    fn test_special_keys() {
+        // Test parsing of special keys
+        assert!(parse_hotkey("Ctrl+PageUp").is_ok());
+        assert!(parse_hotkey("Ctrl+PageDown").is_ok());
+        assert!(parse_hotkey("Ctrl+Home").is_ok());
+        assert!(parse_hotkey("Ctrl+End").is_ok());
+        assert!(parse_hotkey("Ctrl+Tab").is_ok());
+        assert!(parse_hotkey("Ctrl+Insert").is_ok());
+        assert!(parse_hotkey("Ctrl+Delete").is_ok());
+        assert!(parse_hotkey("Ctrl+Backspace").is_ok());
+    }
+
+    #[test]
+    fn test_function_keys() {
+        // Test parsing of function keys
+        for i in 1..=12 {
+            let hotkey = format!("F{}", i);
+            assert!(parse_hotkey(&hotkey).is_ok());
+            assert!(parse_hotkey(&format!("Ctrl+{}", hotkey)).is_ok());
+            assert!(parse_hotkey(&format!("Alt+{}", hotkey)).is_ok());
+        }
+    }
+
+    #[test]
+    fn test_numpad_keys() {
+        // Test parsing of numpad keys
+        assert!(parse_hotkey("Numpad0").is_ok());
+        assert!(parse_hotkey("Numpad9").is_ok());
+        assert!(parse_hotkey("NumpadAdd").is_ok());
+        assert!(parse_hotkey("NumpadSubtract").is_ok());
+        assert!(parse_hotkey("NumpadMultiply").is_ok());
+        assert!(parse_hotkey("NumpadDivide").is_ok());
+        assert!(parse_hotkey("NumpadDecimal").is_ok());
+    }
+
+    #[test]
+    fn test_modifier_combinations() {
+        // Test various modifier combinations
+        assert!(parse_hotkey("Ctrl+Alt+Del").is_ok());
+        assert!(parse_hotkey("Ctrl+Shift+Esc").is_ok());
+        assert!(parse_hotkey("Alt+Shift+Tab").is_ok());
+        assert!(parse_hotkey("Ctrl+Win+Shift+Esc").is_ok());
+    }
 }

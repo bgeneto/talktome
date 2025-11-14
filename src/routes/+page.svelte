@@ -195,45 +195,40 @@
         console.error("Failed to register hotkeys:", error);
       }
 
-      unlistenToggleHK = await listen("toggle-recording-from-hotkey", async () => {
-        console.log("toggle-recording-from-hotkey event received, frontend isRecording:", isRecording);
+      unlistenToggleHK = await listen("start-recording-from-hotkey", async () => {
+        console.log("start-recording-from-hotkey event received");
         if (!guard()) {
           console.log("Guard prevented hotkey action due to debounce");
           return;
         }
-        
-        // Always check backend state before deciding action to avoid race conditions
-        try {
-          const backendRecordingState = await invoke("get_recording_status") as boolean;
-          console.log("Backend recording state:", backendRecordingState, "Frontend state:", isRecording);
-          
-          // Use backend state as authoritative source
-          if (backendRecordingState) {
-            console.log("Backend confirms recording active, calling stopRecording()");
-            stopRecording();
-          } else {
-            console.log("Backend confirms not recording, calling startRecording()");
-            startRecording();
-          }
-          
-          // Sync frontend state with backend state
-          if (isRecording !== backendRecordingState) {
-            console.log("Syncing frontend state from", isRecording, "to", backendRecordingState);
-            isRecording = backendRecordingState;
-            isListening = backendRecordingState;
-            if (!backendRecordingState) audioLevel = 0;
-          }
-        } catch (error) {
-          console.error("Failed to get backend recording status, using frontend state:", error);
-          // Fallback to frontend state if backend query fails
-          if (isRecording) {
-            console.log("Fallback: frontend thinks recording, calling stopRecording()");
-            stopRecording();
-          } else {
-            console.log("Fallback: frontend thinks not recording, calling startRecording()");
-            startRecording();
-          }
+
+        if (!isRecording) {
+          console.log("Starting recording from hotkey");
+          startRecording();
+        } else {
+          console.log("Already recording, ignoring hotkey start request");
         }
+      });
+
+      // Listen for deterministic hotkey stop events
+      let unlistenStopHK = await listen("stop-recording-from-hotkey", async () => {
+        console.log("stop-recording-from-hotkey event received");
+        if (!guard()) {
+          console.log("Guard prevented hotkey action due to debounce");
+          return;
+        }
+
+        if (isRecording) {
+          console.log("Stopping recording from hotkey");
+          stopRecording();
+        } else {
+          console.log("Already not recording, ignoring hotkey stop request");
+        }
+      });
+
+      // Keep old toggle event listener for backward compatibility, but log it
+      let unlistenLegacyToggleHK = await listen("toggle-recording-from-hotkey", async () => {
+        console.warn("Legacy toggle-recording-from-hotkey event received - this should not happen with new implementation");
       });
 
       // Listen for finalized utterances from Rust backend
@@ -346,6 +341,8 @@
       unlistenRecordingStopped();
       unlistenRecordingStarted();
       unlistenRecordingTimeout();
+      unlistenStopHK();
+      unlistenLegacyToggleHK();
     };
   });
 

@@ -60,53 +60,59 @@ const defaultSettings: Settings = {
 function createSettingsStore() {
   let initialSettings: Settings;
 
-  try {
-    const storedSettings = localStorage.getItem("talktome-settings");
-    if (storedSettings) {
-      const parsed = JSON.parse(storedSettings);
-      const mergedHotkeys = {
-        handsFree:
-          parsed?.hotkeys?.handsFree ?? defaultSettings.hotkeys.handsFree,
-      };
-      initialSettings = {
-        ...defaultSettings,
-        ...parsed,
-        hotkeys: mergedHotkeys,
-        // SECURITY: Never load API key from localStorage - always empty it
-        apiKey: "",
-        // FORCE: Always disable audio chunking for reliability (ignore cached value)
-        audioChunkingEnabled: false,
-      } as Settings;
-
-      // SECURITY: Remove API key from localStorage if it exists (migration from insecure storage)
-      if (parsed.apiKey) {
-        const cleanedSettings = {
-          ...parsed,
-          hotkeys: mergedHotkeys,
-          apiKey: "",
-          audioChunkingEnabled: false, // FORCE: Always false in localStorage too
+  // Try to load settings from backend persistent store first
+  const loadSettingsFromBackend = async () => {
+    try {
+      const backendSettings = await invoke("load_persistent_settings") as any;
+      if (backendSettings) {
+        console.log("Settings loaded from backend persistent store");
+        return {
+          ...defaultSettings,
+          spokenLanguage: backendSettings.spoken_language || defaultSettings.spokenLanguage,
+          translationLanguage: backendSettings.translation_language || defaultSettings.translationLanguage,
+          audioDevice: backendSettings.audio_device || defaultSettings.audioDevice,
+          theme: backendSettings.theme || defaultSettings.theme,
+          apiEndpoint: backendSettings.api_endpoint || defaultSettings.apiEndpoint,
+          sttModel: backendSettings.stt_model || defaultSettings.sttModel,
+          translationModel: backendSettings.translation_model || defaultSettings.translationModel,
+          hotkeys: {
+            handsFree: backendSettings.hotkeys?.hands_free || defaultSettings.hotkeys.handsFree,
+          },
+          autoMute: backendSettings.auto_mute ?? defaultSettings.autoMute,
+          translationEnabled: backendSettings.translation_enabled ?? defaultSettings.translationEnabled,
+          debugLogging: backendSettings.debug_logging ?? defaultSettings.debugLogging,
+          textInsertionEnabled: backendSettings.text_insertion_enabled ?? defaultSettings.textInsertionEnabled,
+          audioChunkingEnabled: false, // Always force to false for reliability
+          maxRecordingTimeMinutes: backendSettings.max_recording_time_minutes || defaultSettings.maxRecordingTimeMinutes,
+          quickAccessLanguages: defaultSettings.quickAccessLanguages,
+          vad: defaultSettings.vad,
+          apiKey: "", // Never load API key from backend store - it's stored separately
         };
-        localStorage.setItem(
-          "talktome-settings",
-          JSON.stringify(cleanedSettings)
-        );
-        console.warn(
-          "Removed API key from localStorage for security. API key should only be stored in secure backend storage."
-        );
       }
-    } else {
-      initialSettings = defaultSettings;
+    } catch (error) {
+      console.warn("Failed to load settings from backend, using defaults:", error);
     }
-  } catch (error) {
-    console.error("Error loading settings from localStorage:", error);
-    initialSettings = defaultSettings;
-  }
+    return defaultSettings;
+  };
+
+  // Initialize with default settings first, then try to load from backend
+  initialSettings = defaultSettings;
+
+  // Load settings from backend asynchronously
+  loadSettingsFromBackend().then(loadedSettings => {
+    if (loadedSettings !== defaultSettings) {
+      set(loadedSettings);
+      console.log("Settings updated from backend persistent store");
+    }
+  }).catch(error => {
+    console.error("Error loading settings from backend:", error);
+  });
 
   const { subscribe, set, update } = writable(initialSettings);
 
   const store = { subscribe, set, update };
 
-  // Load API key from backend if not present in localStorage
+  // Load API key from backend if not present
   const loadApiKeyFromBackend = async () => {
     try {
       const currentSettings = get(store);
@@ -115,10 +121,6 @@ function createSettingsStore() {
         if (backendApiKey && backendApiKey.trim() !== "") {
           update((settings) => {
             const newSettings = { ...settings, apiKey: backendApiKey };
-            localStorage.setItem(
-              "talktome-settings",
-              JSON.stringify(newSettings)
-            );
             return newSettings;
           });
         }
@@ -134,30 +136,36 @@ function createSettingsStore() {
   // Load API key from backend on initialization
   loadApiKeyFromBackend();
 
-  // Create syncToBackend function that can be called by setters
-  const syncToBackend = async () => {
+  // Create saveToPersistentStore function that can be called by setters
+  const saveToPersistentStore = async () => {
     try {
       const currentSettings = get(store);
 
-      // SECURITY: Don't send API key in this sync - it's stored separately via store_api_key
-      await invoke("save_settings_from_frontend", {
+      // Convert frontend settings to backend format
+      const backendSettings = {
         spoken_language: currentSettings.spokenLanguage,
         translation_language: currentSettings.translationLanguage,
         audio_device: currentSettings.audioDevice,
         theme: currentSettings.theme,
+        auto_save: true,
         api_endpoint: currentSettings.apiEndpoint,
-        api_key: "", // Always send empty - API key is stored separately for security
         stt_model: currentSettings.sttModel,
         translation_model: currentSettings.translationModel,
+        hotkeys: {
+          hands_free: currentSettings.hotkeys.handsFree,
+        },
         auto_mute: currentSettings.autoMute,
         translation_enabled: currentSettings.translationLanguage !== "none",
         debug_logging: currentSettings.debugLogging,
-        hands_free_hotkey: currentSettings.hotkeys.handsFree,
         text_insertion_enabled: currentSettings.textInsertionEnabled,
-        audio_chunking_enabled: false, // FORCE: Always send false to backend for reliability
-      });
+        audio_chunking_enabled: false, // Always force to false for reliability
+        max_recording_time_minutes: currentSettings.maxRecordingTimeMinutes,
+      };
+
+      await invoke("save_persistent_settings", { settings: backendSettings });
+      // Settings saved to backend persistent store
     } catch (error) {
-      console.error("Failed to sync settings to backend:", error);
+      console.error("Failed to save settings to persistent store:", error);
     }
   };
 
@@ -168,15 +176,9 @@ function createSettingsStore() {
     setSpokenLanguage: (language: string) => {
       update((settings) => {
         const newSettings = { ...settings, spokenLanguage: language };
-        // SECURITY: Never store API key in localStorage
-        const settingsForLocalStorage = { ...newSettings, apiKey: "" };
-        localStorage.setItem(
-          "talktome-settings",
-          JSON.stringify(settingsForLocalStorage)
-        );
-        // Sync to backend
+        // Save to persistent store
         setTimeout(() => {
-          syncToBackend();
+          saveToPersistentStore();
         }, 0);
         return newSettings;
       });
@@ -184,15 +186,9 @@ function createSettingsStore() {
     setTranslationLanguage: (language: string) => {
       update((settings) => {
         const newSettings = { ...settings, translationLanguage: language };
-        // SECURITY: Never store API key in localStorage
-        const settingsForLocalStorage = { ...newSettings, apiKey: "" };
-        localStorage.setItem(
-          "talktome-settings",
-          JSON.stringify(settingsForLocalStorage)
-        );
-        // Sync to backend
+        // Save to persistent store
         setTimeout(() => {
-          syncToBackend();
+          saveToPersistentStore();
         }, 0);
         return newSettings;
       });
@@ -200,15 +196,9 @@ function createSettingsStore() {
     setAudioDevice: (device: string) => {
       update((settings) => {
         const newSettings = { ...settings, audioDevice: device };
-        // SECURITY: Never store API key in localStorage
-        const settingsForLocalStorage = { ...newSettings, apiKey: "" };
-        localStorage.setItem(
-          "talktome-settings",
-          JSON.stringify(settingsForLocalStorage)
-        );
-        // Sync to backend
+        // Save to persistent store
         setTimeout(() => {
-          syncToBackend();
+          saveToPersistentStore();
         }, 0);
         return newSettings;
       });
@@ -216,27 +206,15 @@ function createSettingsStore() {
     setQuickAccessLanguages: (languages: string[]) => {
       update((settings) => {
         const newSettings = { ...settings, quickAccessLanguages: languages };
-        // SECURITY: Never store API key in localStorage
-        const settingsForLocalStorage = { ...newSettings, apiKey: "" };
-        localStorage.setItem(
-          "talktome-settings",
-          JSON.stringify(settingsForLocalStorage)
-        );
         return newSettings;
       });
     },
     setTheme: (theme: string) => {
       update((settings) => {
         const newSettings = { ...settings, theme };
-        // SECURITY: Never store API key in localStorage
-        const settingsForLocalStorage = { ...newSettings, apiKey: "" };
-        localStorage.setItem(
-          "talktome-settings",
-          JSON.stringify(settingsForLocalStorage)
-        );
-        // Sync to backend for consistency
+        // Save to persistent store
         setTimeout(() => {
-          syncToBackend();
+          saveToPersistentStore();
         }, 0);
         return newSettings;
       });
@@ -244,15 +222,9 @@ function createSettingsStore() {
     setAutoMute: (enabled: boolean) => {
       update((settings) => {
         const newSettings = { ...settings, autoMute: enabled };
-        // SECURITY: Never store API key in localStorage
-        const settingsForLocalStorage = { ...newSettings, apiKey: "" };
-        localStorage.setItem(
-          "talktome-settings",
-          JSON.stringify(settingsForLocalStorage)
-        );
-        // Sync to backend
+        // Save to persistent store
         setTimeout(() => {
-          syncToBackend();
+          saveToPersistentStore();
         }, 0);
         return newSettings;
       });
@@ -260,15 +232,9 @@ function createSettingsStore() {
     setDebugLogging: (enabled: boolean) => {
       update((settings) => {
         const newSettings = { ...settings, debugLogging: enabled };
-        // SECURITY: Never store API key in localStorage
-        const settingsForLocalStorage = { ...newSettings, apiKey: "" };
-        localStorage.setItem(
-          "talktome-settings",
-          JSON.stringify(settingsForLocalStorage)
-        );
-        // Sync to backend
+        // Save to persistent store
         setTimeout(() => {
-          syncToBackend();
+          saveToPersistentStore();
         }, 0);
         return newSettings;
       });
@@ -276,15 +242,9 @@ function createSettingsStore() {
     setTextInsertionEnabled: (enabled: boolean) => {
       update((settings) => {
         const newSettings = { ...settings, textInsertionEnabled: enabled };
-        // SECURITY: Never store API key in localStorage
-        const settingsForLocalStorage = { ...newSettings, apiKey: "" };
-        localStorage.setItem(
-          "talktome-settings",
-          JSON.stringify(settingsForLocalStorage)
-        );
-        // Sync to backend
+        // Save to persistent store
         setTimeout(() => {
-          syncToBackend();
+          saveToPersistentStore();
         }, 0);
         return newSettings;
       });
@@ -293,15 +253,9 @@ function createSettingsStore() {
       update((settings) => {
         // FORCE: Always keep audio chunking disabled for reliability (ignore input parameter)
         const newSettings = { ...settings, audioChunkingEnabled: false };
-        // SECURITY: Never store API key in localStorage
-        const settingsForLocalStorage = { ...newSettings, apiKey: "" };
-        localStorage.setItem(
-          "talktome-settings",
-          JSON.stringify(settingsForLocalStorage)
-        );
-        // Sync to backend
+        // Save to persistent store
         setTimeout(() => {
-          syncToBackend();
+          saveToPersistentStore();
         }, 0);
         return newSettings;
       });
@@ -312,31 +266,16 @@ function createSettingsStore() {
           ...settings,
           vad: { ...settings.vad, ...vadSettings },
         };
-        // SECURITY: Never store API key in localStorage
-        const settingsForLocalStorage = { ...newSettings, apiKey: "" };
-        localStorage.setItem(
-          "talktome-settings",
-          JSON.stringify(settingsForLocalStorage)
-        );
-        // Sync to backend for real-time VAD updates
-        setTimeout(() => {
-          syncToBackend();
-        }, 0);
+        // VAD settings are not persisted to backend (frontend-only)
         return newSettings;
       });
     },
     setApiEndpoint: (endpoint: string) => {
       update((settings) => {
         const newSettings = { ...settings, apiEndpoint: endpoint };
-        // SECURITY: Never store API key in localStorage
-        const settingsForLocalStorage = { ...newSettings, apiKey: "" };
-        localStorage.setItem(
-          "talktome-settings",
-          JSON.stringify(settingsForLocalStorage)
-        );
-        // Sync to backend for consistency
+        // Save to persistent store
         setTimeout(() => {
-          syncToBackend();
+          saveToPersistentStore();
         }, 0);
         return newSettings;
       });
@@ -344,15 +283,8 @@ function createSettingsStore() {
     setApiKey: async (key: string) => {
       return new Promise((resolve, reject) => {
         update((settings) => {
-          // SECURITY: Store API key securely in backend only, never in localStorage
+          // SECURITY: Store API key securely in backend only
           const newSettings = { ...settings, apiKey: key };
-
-          // Save all OTHER settings to localStorage (excluding API key)
-          const settingsForLocalStorage = { ...newSettings, apiKey: "" }; // Set to empty instead of delete
-          localStorage.setItem(
-            "talktome-settings",
-            JSON.stringify(settingsForLocalStorage)
-          );
 
           // Store API key securely in backend.
           // Send both snake_case and camelCase forms to be robust against platform naming inconsistencies.
@@ -361,7 +293,7 @@ function createSettingsStore() {
               console.log("API key stored successfully in backend");
               // Sync other settings to backend for consistency
               setTimeout(() => {
-                syncToBackend();
+                saveToPersistentStore();
               }, 0);
               resolve(newSettings);
             })
@@ -381,7 +313,7 @@ function createSettingsStore() {
               }
               // Still update the store in memory so the user can use the key temporarily
               setTimeout(() => {
-                syncToBackend();
+                saveToPersistentStore();
               }, 0);
               reject(new Error(msg));
             });
@@ -393,15 +325,9 @@ function createSettingsStore() {
     setSttModel: (model: string) => {
       update((settings) => {
         const newSettings = { ...settings, sttModel: model };
-        // SECURITY: Never store API key in localStorage
-        const settingsForLocalStorage = { ...newSettings, apiKey: "" };
-        localStorage.setItem(
-          "talktome-settings",
-          JSON.stringify(settingsForLocalStorage)
-        );
-        // Sync to backend for consistency
+        // Save to persistent store
         setTimeout(() => {
-          syncToBackend();
+          saveToPersistentStore();
         }, 0);
         return newSettings;
       });
@@ -409,15 +335,9 @@ function createSettingsStore() {
     setTranslationModel: (model: string) => {
       update((settings) => {
         const newSettings = { ...settings, translationModel: model };
-        // SECURITY: Never store API key in localStorage
-        const settingsForLocalStorage = { ...newSettings, apiKey: "" };
-        localStorage.setItem(
-          "talktome-settings",
-          JSON.stringify(settingsForLocalStorage)
-        );
-        // Sync to backend for consistency
+        // Save to persistent store
         setTimeout(() => {
-          syncToBackend();
+          saveToPersistentStore();
         }, 0);
         return newSettings;
       });
@@ -427,19 +347,13 @@ function createSettingsStore() {
     }) => {
       update((settings) => {
         const newSettings = { ...settings, hotkeys };
-        // SECURITY: Never store API key in localStorage
-        const settingsForLocalStorage = { ...newSettings, apiKey: "" };
-        localStorage.setItem(
-          "talktome-settings",
-          JSON.stringify(settingsForLocalStorage)
-        );
         // Register hotkeys with backend
         invoke("register_hotkeys", { hotkeys }).catch((err) => {
           console.error("Failed to register hotkeys:", err);
         });
-        // Sync to backend for consistency
+        // Save to persistent store
         setTimeout(() => {
-          syncToBackend();
+          saveToPersistentStore();
         }, 0);
         return newSettings;
       });
@@ -693,8 +607,8 @@ function createSettingsStore() {
       }
     },
 
-    // Sync settings to backend
-    syncToBackend,
+    // Sync settings to persistent store
+    saveToPersistentStore,
 
     // Load API key from backend
     loadApiKeyFromBackend,
