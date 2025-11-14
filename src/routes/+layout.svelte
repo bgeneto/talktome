@@ -77,7 +77,7 @@
     },
   ];
 
-  onMount(async () => {
+  onMount(() => {
     // Subscribe to settings changes and apply theme
     const unsubscribe = settings.subscribe((currentSettings) => {
       if (currentSettings.theme) {
@@ -86,25 +86,27 @@
     });
 
     // Listen for tray events to show specific pages
-    await listen("show-preferences", () => {
-      goto("/preferences");
-    });
+    (async () => {
+      await listen("show-preferences", () => {
+        goto("/preferences");
+      });
 
-    await listen("show-api-settings", () => {
-      goto("/api-settings");
-    });
+      await listen("show-api-settings", () => {
+        goto("/api-settings");
+      });
 
-    await listen("show-language-settings", () => {
-      goto("/language-settings");
-    });
+      await listen("show-language-settings", () => {
+        goto("/language-settings");
+      });
 
-    await listen("show-audio-settings", () => {
-      goto("/audio-settings");
-    });
+      await listen("show-audio-settings", () => {
+        goto("/audio-settings");
+      });
 
-    await listen("show-about", () => {
-      goto("/about");
-    });
+      await listen("show-about", () => {
+        goto("/about");
+      });
+    })();
 
     // Update current page based on route
     page.subscribe(($page) => {

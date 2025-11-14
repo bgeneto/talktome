@@ -27,8 +27,10 @@
       currentSettings = { ...s };
     });
 
-    // Load data directory info
-    loadDataDirectoryInfo();
+    // Load data directory info asynchronously
+    loadDataDirectoryInfo().catch(error => {
+      console.error("Failed to load data directory info on mount:", error);
+    });
 
     return () => unsubscribe();
   });
