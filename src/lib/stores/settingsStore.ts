@@ -1,5 +1,6 @@
 import { writable, get } from "svelte/store";
 import { invoke } from "@tauri-apps/api/core";
+import { Store } from "@tauri-apps/plugin-store";
 
 interface Settings {
   spokenLanguage: string;
@@ -57,13 +58,15 @@ const defaultSettings: Settings = {
   },
 };
 
-function createSettingsStore() {
+async function createSettingsStore() {
+  const storePlugin = await Store.load("settings.dat");
   let initialSettings: Settings;
 
   try {
-    const storedSettings = localStorage.getItem("talktome-settings");
+    // Try to load from store plugin first
+    const storedSettings = await storePlugin.get("talktome-settings");
     if (storedSettings) {
-      const parsed = JSON.parse(storedSettings);
+      const parsed = storedSettings as any;
       const mergedHotkeys = {
         handsFree:
           parsed?.hotkeys?.handsFree ?? defaultSettings.hotkeys.handsFree,
@@ -72,53 +75,68 @@ function createSettingsStore() {
         ...defaultSettings,
         ...parsed,
         hotkeys: mergedHotkeys,
-        // SECURITY: Never load API key from localStorage - always empty it
+        // SECURITY: Never load API key from store - always empty it
         apiKey: "",
         // FORCE: Always disable audio chunking for reliability (ignore cached value)
         audioChunkingEnabled: false,
       } as Settings;
-
-      // SECURITY: Remove API key from localStorage if it exists (migration from insecure storage)
-      if (parsed.apiKey) {
-        const cleanedSettings = {
-          ...parsed,
-          hotkeys: mergedHotkeys,
-          apiKey: "",
-          audioChunkingEnabled: false, // FORCE: Always false in localStorage too
-        };
-        localStorage.setItem(
-          "talktome-settings",
-          JSON.stringify(cleanedSettings)
-        );
-        console.warn(
-          "Removed API key from localStorage for security. API key should only be stored in secure backend storage."
-        );
-      }
     } else {
-      initialSettings = defaultSettings;
+      // Try to migrate from localStorage if available
+      try {
+        const localStorageSettings = localStorage.getItem("talktome-settings");
+        if (localStorageSettings) {
+          const parsed = JSON.parse(localStorageSettings);
+          const mergedHotkeys = {
+            handsFree:
+              parsed?.hotkeys?.handsFree ?? defaultSettings.hotkeys.handsFree,
+          };
+          initialSettings = {
+            ...defaultSettings,
+            ...parsed,
+            hotkeys: mergedHotkeys,
+            // SECURITY: Never load API key from localStorage - always empty it
+            apiKey: "",
+            // FORCE: Always disable audio chunking for reliability (ignore cached value)
+            audioChunkingEnabled: false,
+          } as Settings;
+
+          // Migrate to store plugin
+          const settingsForStore = { ...initialSettings, apiKey: "" };
+          await storePlugin.set("talktome-settings", settingsForStore);
+          await storePlugin.save();
+          console.log("Migrated settings from localStorage to store plugin");
+
+          // Clean up localStorage
+          localStorage.removeItem("talktome-settings");
+        } else {
+          initialSettings = defaultSettings;
+        }
+      } catch (localStorageError) {
+        console.error("Error loading from localStorage during migration:", localStorageError);
+        initialSettings = defaultSettings;
+      }
     }
   } catch (error) {
-    console.error("Error loading settings from localStorage:", error);
+    console.error("Error loading settings from store:", error);
     initialSettings = defaultSettings;
   }
 
   const { subscribe, set, update } = writable(initialSettings);
 
-  const store = { subscribe, set, update };
+  const settingsStore = { subscribe, set, update };
 
   // Load API key from backend if not present in localStorage
   const loadApiKeyFromBackend = async () => {
     try {
-      const currentSettings = get(store);
+      const currentSettings = get(settingsStore);
       if (!currentSettings.apiKey || currentSettings.apiKey.trim() === "") {
         const backendApiKey = (await invoke("get_api_key")) as string;
         if (backendApiKey && backendApiKey.trim() !== "") {
           update((settings) => {
             const newSettings = { ...settings, apiKey: backendApiKey };
-            localStorage.setItem(
-              "talktome-settings",
-              JSON.stringify(newSettings)
-            );
+            // Update store plugin instead of localStorage
+            const settingsForStore = { ...newSettings, apiKey: "" };
+            storePlugin.set("talktome-settings", settingsForStore).then(() => storePlugin.save());
             return newSettings;
           });
         }
@@ -137,7 +155,7 @@ function createSettingsStore() {
   // Create syncToBackend function that can be called by setters
   const syncToBackend = async () => {
     try {
-      const currentSettings = get(store);
+      const currentSettings = get(settingsStore);
 
       // SECURITY: Don't send API key in this sync - it's stored separately via store_api_key
       await invoke("save_settings_from_frontend", {
@@ -165,6 +183,7 @@ function createSettingsStore() {
     subscribe,
     set,
     update,
+    storePlugin, // Make store plugin available for saving
     setSpokenLanguage: (language: string) => {
       update((settings) => {
         const newSettings = { ...settings, spokenLanguage: language };
@@ -328,12 +347,9 @@ function createSettingsStore() {
     setApiEndpoint: (endpoint: string) => {
       update((settings) => {
         const newSettings = { ...settings, apiEndpoint: endpoint };
-        // SECURITY: Never store API key in localStorage
-        const settingsForLocalStorage = { ...newSettings, apiKey: "" };
-        localStorage.setItem(
-          "talktome-settings",
-          JSON.stringify(settingsForLocalStorage)
-        );
+        // Save to store plugin instead of localStorage
+        const settingsForStore = { ...newSettings, apiKey: "" };
+        storePlugin.set("talktome-settings", settingsForStore).then(() => storePlugin.save());
         // Sync to backend for consistency
         setTimeout(() => {
           syncToBackend();
@@ -701,4 +717,4 @@ function createSettingsStore() {
   };
 }
 
-export const settings = createSettingsStore();
+export const settings = await createSettingsStore();

@@ -326,6 +326,7 @@
             type="text"
             id="apiEndpoint"
             bind:value={currentSettings.apiEndpoint}
+            on:change={() => persistSettings({ apiEndpoint: currentSettings.apiEndpoint })}
             placeholder="https://api.openai.com/v1"
             class="w-full px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-md shadow-sm focus:outline-none focus:ring-blue-500 focus:border-blue-500 dark:bg-gray-700 dark:text-white"
           />

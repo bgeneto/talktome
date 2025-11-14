@@ -77,32 +77,32 @@
     },
   ];
 
-  onMount(async () => {
-    // Subscribe to settings changes and apply theme
-    const unsubscribe = settings.subscribe((currentSettings) => {
+  onMount(() => {
+    // Subscribe to settings changes
+    const unsubscribe = settings.subscribe((currentSettings: any) => {
       if (currentSettings.theme) {
         applyGlobalTheme(currentSettings.theme);
       }
     });
 
     // Listen for tray events to show specific pages
-    await listen("show-preferences", () => {
+    listen("show-preferences", () => {
       goto("/preferences");
     });
 
-    await listen("show-api-settings", () => {
+    listen("show-api-settings", () => {
       goto("/api-settings");
     });
 
-    await listen("show-language-settings", () => {
+    listen("show-language-settings", () => {
       goto("/language-settings");
     });
 
-    await listen("show-audio-settings", () => {
+    listen("show-audio-settings", () => {
       goto("/audio-settings");
     });
 
-    await listen("show-about", () => {
+    listen("show-about", () => {
       goto("/about");
     });
 
@@ -114,7 +114,7 @@
       currentPage = item ? item.label : "Home";
     });
 
-    // Cleanup subscription on unmount
+    // Return cleanup function
     return () => {
       unsubscribe();
     };

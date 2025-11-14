@@ -7,45 +7,7 @@ use nnnoiseless::DenoiseState;
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
 
-/// Simple WAV file encoder for debugging purposes
-fn encode_wav_bytes(samples: &[f32], sample_rate: u32) -> Vec<u8> {
-    let num_samples = samples.len() as u32;
-    let num_channels = 1u16; // Mono
-    let bits_per_sample = 16u16;
-    let byte_rate = sample_rate * num_channels as u32 * bits_per_sample as u32 / 8;
-    let block_align = num_channels * bits_per_sample / 8;
-    let data_size = num_samples * bits_per_sample as u32 / 8;
-    let file_size = 36 + data_size;
 
-    let mut wav_data = Vec::new();
-
-    // RIFF header
-    wav_data.extend_from_slice(b"RIFF");
-    wav_data.extend_from_slice(&file_size.to_le_bytes());
-    wav_data.extend_from_slice(b"WAVE");
-
-    // fmt chunk
-    wav_data.extend_from_slice(b"fmt ");
-    wav_data.extend_from_slice(&16u32.to_le_bytes()); // fmt chunk size
-    wav_data.extend_from_slice(&1u16.to_le_bytes()); // audio format (PCM)
-    wav_data.extend_from_slice(&num_channels.to_le_bytes());
-    wav_data.extend_from_slice(&sample_rate.to_le_bytes());
-    wav_data.extend_from_slice(&byte_rate.to_le_bytes());
-    wav_data.extend_from_slice(&block_align.to_le_bytes());
-    wav_data.extend_from_slice(&bits_per_sample.to_le_bytes());
-
-    // data chunk
-    wav_data.extend_from_slice(b"data");
-    wav_data.extend_from_slice(&data_size.to_le_bytes());
-
-    // Convert f32 samples to i16 and append
-    for &sample in samples {
-        let sample_i16 = (sample.clamp(-1.0, 1.0) * 32767.0) as i16;
-        wav_data.extend_from_slice(&sample_i16.to_le_bytes());
-    }
-
-    wav_data
-}
 
 /// Simple downsampling function using decimation
 fn downsample_audio(input: &[f32], input_rate: u32, target_rate: u32) -> Vec<f32> {

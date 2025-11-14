@@ -5,6 +5,13 @@
   import { settings } from "../lib/stores/settingsStore";
   import { get } from "svelte/store";
 
+  // Check if Tauri is available
+  let isTauriAvailable = false;
+  onMount(() => {
+    // Check if we're running in Tauri
+    isTauriAvailable = !!(window as any).__TAURI__;
+  });
+
   let isRecording = false;
   let transcribedText = "";
   let translatedText = "";
@@ -133,208 +140,211 @@
   ];
 
   onMount(() => {
-    // Listen for tray menu events
-    (async () => {
-      unlistenSpokenLanguage = await listen(
-        "tray-spoken-language-change",
-        (event) => {
-          const language = event.payload as string;
-          settings.setSpokenLanguage(language);
-          selectedSourceLang = language;
-        }
-      );
+    // Only set up Tauri-specific functionality if running in Tauri
+    if (isTauriAvailable) {
+      // Listen for tray menu events
+      (async () => {
+        unlistenSpokenLanguage = await listen(
+          "tray-spoken-language-change",
+          (event) => {
+            const language = event.payload as string;
+            settings.setSpokenLanguage(language);
+            selectedSourceLang = language;
+          }
+        );
 
-      unlistenTranslationLanguage = await listen(
-        "tray-translation-language-change",
-        (event) => {
-          const language = event.payload as string;
-          settings.setTranslationLanguage(language);
-          selectedTargetLang = language;
-        }
-      );
+        unlistenTranslationLanguage = await listen(
+          "tray-translation-language-change",
+          (event) => {
+            const language = event.payload as string;
+            settings.setTranslationLanguage(language);
+            selectedTargetLang = language;
+          }
+        );
 
-      unlistenAudioDevice = await listen("tray-audio-input-change", (event) => {
-        const device = event.payload as string;
-        settings.setAudioDevice(device);
-      });
-
-      // Register initial hotkeys and listeners asynchronously
-      const currentSettings = get(settings);
-
-      // Debounce guard to prevent rapid toggles from key repeat or programmatic loops
-      let lastToggle = 0;
-      function guard(ms = 150) {
-        const now = Date.now();
-        const elapsed = now - lastToggle;
-        if (elapsed < ms) {
-          console.log(`Guard blocked hotkey (${elapsed}ms < ${ms}ms)`);
-          return false;
-        }
-        lastToggle = now;
-        console.log(`Guard allowed hotkey (${elapsed}ms >= ${ms}ms)`);
-        return true;
-      }
-
-      // Declare unlisten placeholder for hands-free hotkey
-      let unlistenToggleHK = () => {};
-
-      // Explicit hotkey events from backend
-      try {
-        console.log("Attempting to register hotkeys:", {
-          handsFree: currentSettings.hotkeys.handsFree,
+        unlistenAudioDevice = await listen("tray-audio-input-change", (event) => {
+          const device = event.payload as string;
+          settings.setAudioDevice(device);
         });
-        await invoke("register_hotkeys", {
-          hotkeys: {
-            handsFree: currentSettings.hotkeys.handsFree,
-          },
-        });
-        console.log("Hotkeys registered successfully:", {
-          handsFree: currentSettings.hotkeys.handsFree,
-        });
-      } catch (error) {
-        console.error("Failed to register hotkeys:", error);
-      }
 
-      unlistenToggleHK = await listen("toggle-recording-from-hotkey", async () => {
-        console.log("toggle-recording-from-hotkey event received, frontend isRecording:", isRecording);
-        if (!guard()) {
-          console.log("Guard prevented hotkey action due to debounce");
-          return;
+        // Register initial hotkeys and listeners asynchronously
+        const currentSettings = get(settings);
+
+        // Debounce guard to prevent rapid toggles from key repeat or programmatic loops
+        let lastToggle = 0;
+        function guard(ms = 150) {
+          const now = Date.now();
+          const elapsed = now - lastToggle;
+          if (elapsed < ms) {
+            console.log(`Guard blocked hotkey (${elapsed}ms < ${ms}ms)`);
+            return false;
+          }
+          lastToggle = now;
+          console.log(`Guard allowed hotkey (${elapsed}ms >= ${ms}ms)`);
+          return true;
         }
-        
-        // Always check backend state before deciding action to avoid race conditions
+
+        // Declare unlisten placeholder for hands-free hotkey
+        let unlistenToggleHK = () => {};
+
+        // Explicit hotkey events from backend
         try {
-          const backendRecordingState = await invoke("get_recording_status") as boolean;
-          console.log("Backend recording state:", backendRecordingState, "Frontend state:", isRecording);
-          
-          // Use backend state as authoritative source
-          if (backendRecordingState) {
-            console.log("Backend confirms recording active, calling stopRecording()");
-            stopRecording();
-          } else {
-            console.log("Backend confirms not recording, calling startRecording()");
-            startRecording();
-          }
-          
-          // Sync frontend state with backend state
-          if (isRecording !== backendRecordingState) {
-            console.log("Syncing frontend state from", isRecording, "to", backendRecordingState);
-            isRecording = backendRecordingState;
-            isListening = backendRecordingState;
-            if (!backendRecordingState) audioLevel = 0;
-          }
+          console.log("Attempting to register hotkeys:", {
+            handsFree: currentSettings.hotkeys.handsFree,
+          });
+          await invoke("register_hotkeys", {
+            hotkeys: {
+              handsFree: currentSettings.hotkeys.handsFree,
+            },
+          });
+          console.log("Hotkeys registered successfully:", {
+            handsFree: currentSettings.hotkeys.handsFree,
+          });
         } catch (error) {
-          console.error("Failed to get backend recording status, using frontend state:", error);
-          // Fallback to frontend state if backend query fails
-          if (isRecording) {
-            console.log("Fallback: frontend thinks recording, calling stopRecording()");
-            stopRecording();
-          } else {
-            console.log("Fallback: frontend thinks not recording, calling startRecording()");
-            startRecording();
-          }
+          console.error("Failed to register hotkeys:", error);
         }
-      });
 
-      // Listen for finalized utterances from Rust backend
-      unlistenTranscriptionUpdate = await listen(
-        "transcribed-text",
-        (event) => {
-          const payload: any = event.payload;
-          // Payload can be either a plain string (legacy / simple final text)
-          // or an object { raw, final } where raw is original aggregated utterance
-          // and final is processed/translated text when translation is enabled.
-          if (typeof payload === "string") {
-            const finalText: string = payload;
-            // For string payload, treat as original transcribed text only
-            pushChunkDedup(originalChunks, finalText);
-            syncDisplays(); // Show transcribed text immediately
+        unlistenToggleHK = await listen("toggle-recording-from-hotkey", async () => {
+          console.log("toggle-recording-from-hotkey event received, frontend isRecording:", isRecording);
+          if (!guard()) {
+            console.log("Guard prevented hotkey action due to debounce");
+            return;
+          }
 
-            // Handle client-side translation asynchronously (don't wait)
-            const translationEnabledUI =
-              selectedTargetLang &&
-              selectedTargetLang !== "none" &&
-              selectedTargetLang !== selectedSourceLang;
-            if (translationEnabledUI) {
-              // Start translation in background, don't await
-              translateText(finalText, { append: true }).catch((err) => {
-                console.error("Background translation failed:", err);
-              });
-            }
-          } else if (payload) {
-            // Handle structured payload with separate raw and final text
-            const raw: string = payload.raw ?? "";
-            const final: string = payload.final ?? "";
+          // Always check backend state before deciding action to avoid race conditions
+          try {
+            const backendRecordingState = await invoke("get_recording_status") as boolean;
+            console.log("Backend recording state:", backendRecordingState, "Frontend state:", isRecording);
 
-            // Always add raw text to original chunks and show immediately
-            if (raw) {
-              pushChunkDedup(originalChunks, raw);
-              syncDisplays(); // Show transcribed text immediately
-            }
-
-            // Check if we have processed/corrected text from backend
-            if (final && final !== raw) {
-              // Backend provided processed/corrected text (could be translation or just correction)
-              pushChunkDedup(translatedChunks, final);
-              syncDisplays(); // Update with processed text
+            // Use backend state as authoritative source
+            if (backendRecordingState) {
+              console.log("Backend confirms recording active, calling stopRecording()");
+              stopRecording();
             } else {
-              // Check if client-side translation is needed
+              console.log("Backend confirms not recording, calling startRecording()");
+              startRecording();
+            }
+
+            // Sync frontend state with backend state
+            if (isRecording !== backendRecordingState) {
+              console.log("Syncing frontend state from", isRecording, "to", backendRecordingState);
+              isRecording = backendRecordingState;
+              isListening = backendRecordingState;
+              if (!backendRecordingState) audioLevel = 0;
+            }
+          } catch (error) {
+            console.error("Failed to get backend recording status, using frontend state:", error);
+            // Fallback to frontend state if backend query fails
+            if (isRecording) {
+              console.log("Fallback: frontend thinks recording, calling stopRecording()");
+              stopRecording();
+            } else {
+              console.log("Fallback: frontend thinks not recording, calling startRecording()");
+              startRecording();
+            }
+          }
+        });
+
+        // Listen for finalized utterances from Rust backend
+        unlistenTranscriptionUpdate = await listen(
+          "transcribed-text",
+          (event) => {
+            const payload: any = event.payload;
+            // Payload can be either a plain string (legacy / simple final text)
+            // or an object { raw, final } where raw is original aggregated utterance
+            // and final is processed/translated text when translation is enabled.
+            if (typeof payload === "string") {
+              const finalText: string = payload;
+              // For string payload, treat as original transcribed text only
+              pushChunkDedup(originalChunks, finalText);
+              syncDisplays(); // Show transcribed text immediately
+
+              // Handle client-side translation asynchronously (don't wait)
               const translationEnabledUI =
                 selectedTargetLang &&
                 selectedTargetLang !== "none" &&
                 selectedTargetLang !== selectedSourceLang;
-
-              if (translationEnabledUI && raw) {
-                // Start client-side translation asynchronously (don't wait)
-                translateText(raw, { append: true }).catch((err) => {
+              if (translationEnabledUI) {
+                // Start translation in background, don't await
+                translateText(finalText, { append: true }).catch((err) => {
                   console.error("Background translation failed:", err);
                 });
               }
+            } else if (payload) {
+              // Handle structured payload with separate raw and final text
+              const raw: string = payload.raw ?? "";
+              const final: string = payload.final ?? "";
+
+              // Always add raw text to original chunks and show immediately
+              if (raw) {
+                pushChunkDedup(originalChunks, raw);
+                syncDisplays(); // Show transcribed text immediately
+              }
+
+              // Check if we have processed/corrected text from backend
+              if (final && final !== raw) {
+                // Backend provided processed/corrected text (could be translation or just correction)
+                pushChunkDedup(translatedChunks, final);
+                syncDisplays(); // Update with processed text
+              } else {
+                // Check if client-side translation is needed
+                const translationEnabledUI =
+                  selectedTargetLang &&
+                  selectedTargetLang !== "none" &&
+                  selectedTargetLang !== selectedSourceLang;
+
+                if (translationEnabledUI && raw) {
+                  // Start client-side translation asynchronously (don't wait)
+                  translateText(raw, { append: true }).catch((err) => {
+                    console.error("Background translation failed:", err);
+                  });
+                }
+              }
+              // Note: translatedChunks now contains either translated text OR corrected text
             }
-            // Note: translatedChunks now contains either translated text OR corrected text
           }
-        }
-      );
+        );
 
-      // Listen to backend recording-stopped to mark session ended
-      unlistenRecordingStopped = await listen("recording-stopped", () => {
-        console.log("Backend recording-stopped event received, syncing frontend state");
-        
-        // Update recording state
-        isRecording = false;
-        isListening = false;
-        sessionEnded = true;
-        audioLevel = 0;
-        
-        console.log("Frontend state synced: isRecording=", isRecording, "isListening=", isListening);
-        showTrayNotification("Recording stopped");
-      });
+        // Listen to backend recording-stopped to mark session ended
+        unlistenRecordingStopped = await listen("recording-stopped", () => {
+          console.log("Backend recording-stopped event received, syncing frontend state");
 
-      // Listen to backend recording-started to sync frontend state
-      unlistenRecordingStarted = await listen("recording-started", () => {
-        console.log("Backend recording-started event received, syncing frontend state");
-        
-        // Clear previous session if it ended
-        if (sessionEnded) {
-          originalChunks = [];
-          translatedChunks = [];
-          syncDisplays();
-        }
-        
-        // Update recording state
-        isRecording = true;
-        isListening = true;
-        sessionEnded = false;
-        
-        console.log("Frontend state synced: isRecording=", isRecording, "isListening=", isListening);
-      });
+          // Update recording state
+          isRecording = false;
+          isListening = false;
+          sessionEnded = true;
+          audioLevel = 0;
 
-      // Listen for recording timeout events
-      unlistenRecordingTimeout = await listen("recording-timeout", () => {
-        sessionEnded = true;
-        showTrayNotification("Recording stopped - time limit exceeded");
-      });
-    })();
+          console.log("Frontend state synced: isRecording=", isRecording, "isListening=", isListening);
+          showTrayNotification("Recording stopped");
+        });
+
+        // Listen to backend recording-started to sync frontend state
+        unlistenRecordingStarted = await listen("recording-started", () => {
+          console.log("Backend recording-started event received, syncing frontend state");
+
+          // Clear previous session if it ended
+          if (sessionEnded) {
+            originalChunks = [];
+            translatedChunks = [];
+            syncDisplays();
+          }
+
+          // Update recording state
+          isRecording = true;
+          isListening = true;
+          sessionEnded = false;
+
+          console.log("Frontend state synced: isRecording=", isRecording, "isListening=", isListening);
+        });
+
+        // Listen for recording timeout events
+        unlistenRecordingTimeout = await listen("recording-timeout", () => {
+          sessionEnded = true;
+          showTrayNotification("Recording stopped - time limit exceeded");
+        });
+      })();
+    }
 
     return () => {
       // Clean up event listeners
@@ -351,25 +361,26 @@
 
   async function startRecording() {
     console.log("startRecording() called, current isRecording:", isRecording);
-    
+
     // Immediately update frontend state to prevent race conditions
     isRecording = true;
     isListening = true;
     console.log("Frontend state immediately set to recording=true to prevent race conditions");
-    
-    // Try to start recording with Rust backend services immediately
-    try {
-      // Get current settings from localStorage
-      const currentSettings = get(settings);
 
+    // Try to start recording with Rust backend services if Tauri is available
+    if (isTauriAvailable) {
       try {
-        await invoke("frontend_log", {
-          tag: "start_recording_attempt",
-          payload: { ts: Date.now() },
-        });
-      } catch (e) {
-        console.warn("frontend_log failed:", e);
-      }
+        // Get current settings from localStorage
+        const currentSettings = get(settings);
+
+        try {
+          await invoke("frontend_log", {
+            tag: "start_recording_attempt",
+            payload: { ts: Date.now() },
+          });
+        } catch (e) {
+          console.warn("frontend_log failed:", e);
+        }
         await invoke("start_recording", {
           spokenLanguage: currentSettings.spokenLanguage,
           translationLanguage: currentSettings.translationLanguage,
@@ -385,7 +396,7 @@
         });
         // State already set to true above, confirm it's still correct
         console.log("Recording started successfully, isRecording confirmed:", isRecording);
-        
+
         // Show recording started notification
         try {
           invoke("show_recording_started_notification").catch(error => {
@@ -394,7 +405,7 @@
         } catch (error) {
           console.warn("Failed to invoke recording started notification:", error);
         }
-        
+
         // Only clear previous session text if the previous session ended
         if (sessionEnded) {
           originalChunks = [];
@@ -410,7 +421,7 @@
         isRecording = false;
         isListening = false;
         console.log("Recording start failed, state reset to false");
-        
+
         // Fallback to Web Speech API
         const recognition = initWebSpeechAPI();
         if (!recognition) {
@@ -459,7 +470,56 @@
           );
         }
       }
+    } else {
+      // Fallback to Web Speech API when not running in Tauri
+      const recognition = initWebSpeechAPI();
+      if (!recognition) {
+        alert("Speech recognition not supported in this browser");
+        return;
+      }
+
+      try {
+        // Get microphone access for audio level monitoring
+        microphoneStream = await navigator.mediaDevices.getUserMedia({
+          audio: true,
+        });
+
+        // Set up audio context for level monitoring
+        audioContext = new ((window as any).AudioContext ||
+          (window as any).webkitAudioContext)();
+        const ctx = audioContext!;
+        const source = ctx.createMediaStreamSource(microphoneStream);
+        analyzer = ctx.createAnalyser();
+        analyzer.fftSize = 256;
+        source.connect(analyzer);
+
+        // Start audio level monitoring
+        monitorAudioLevel();
+
+        isRecording = true;
+        isListening = true;
+        // Only clear previous session text if the previous session ended
+        if (sessionEnded) {
+          originalChunks = [];
+          translatedChunks = [];
+          syncDisplays();
+          sessionEnded = false;
+        }
+        useWebSpeechAPI = true;
+        recognition.start();
+        showTrayNotification("Recording started");
+      } catch (error) {
+        console.error("Microphone access denied:", error);
+        // Reset state on failure
+        isRecording = false;
+        isListening = false;
+        console.log("Microphone access failed, state reset to false");
+        alert(
+          "Microphone access is required for voice recording. Please allow microphone access and try again."
+        );
+      }
     }
+  }
 
   function monitorAudioLevel() {
     if (!analyzer || !isRecording) return;
@@ -485,16 +545,18 @@
 
   async function stopRecording() {
     console.log("stopRecording() called - call stack:", new Error().stack);
-    
-    // Show recording stopped notification immediately (non-blocking)
-    try {
-      invoke("show_recording_stopped_notification").catch(error => {
-        console.warn("Failed to show recording stopped notification:", error);
-      });
-    } catch (error) {
-      console.warn("Failed to invoke recording stopped notification:", error);
+
+    // Show recording stopped notification immediately (non-blocking) - only if Tauri is available
+    if (isTauriAvailable) {
+      try {
+        invoke("show_recording_stopped_notification").catch(error => {
+          console.warn("Failed to show recording stopped notification:", error);
+        });
+      } catch (error) {
+        console.warn("Failed to invoke recording stopped notification:", error);
+      }
     }
-    
+
     if (useWebSpeechAPI) {
       isRecording = false;
       isListening = false;
@@ -516,7 +578,7 @@
       }
 
       analyzer = null;
-    } else {
+    } else if (isTauriAvailable) {
       // Stop recording with Rust backend services
       try {
         try {
@@ -549,6 +611,11 @@
       } catch (error) {
         console.error("Failed to stop recording with Rust backend:", error);
       }
+    } else {
+      // Not using Web Speech API and Tauri not available - just stop locally
+      isRecording = false;
+      isListening = false;
+      audioLevel = 0;
     }
   }
 
@@ -562,24 +629,23 @@
 
     isTranslating = true;
     try {
-      // Try to use Rust backend translation service first
-      const result = await invoke("translate_text", {
-        text: text,
-        sourceLang: selectedSourceLang,
-        targetLang: selectedTargetLang,
-      });
-      const translatedChunk = (result as string) || "";
-      if (opts.append) {
-        pushChunkDedup(translatedChunks, translatedChunk);
-        syncDisplays();
+      // Try to use Rust backend translation service first if Tauri is available
+      if (isTauriAvailable) {
+        const result = await invoke("translate_text", {
+          text: text,
+          sourceLang: selectedSourceLang,
+          targetLang: selectedTargetLang,
+        });
+        const translatedChunk = (result as string) || "";
+        if (opts.append) {
+          pushChunkDedup(translatedChunks, translatedChunk);
+          syncDisplays();
+        } else {
+          translatedChunks = [translatedChunk];
+          syncDisplays();
+        }
       } else {
-        translatedChunks = [translatedChunk];
-        syncDisplays();
-      }
-    } catch (error) {
-      console.error("Translation error with Rust backend:", error);
-      // Fallback to free translation API (MyMemory API)
-      try {
+        // Fallback to free translation API when Tauri is not available
         const sourceLang =
           selectedSourceLang === "auto" ? "en" : selectedSourceLang;
         const targetLang = selectedTargetLang;
@@ -605,12 +671,12 @@
         } else {
           throw new Error("Network error");
         }
-      } catch (fallbackError) {
-        console.error("Translation error with fallback API:", fallbackError);
-        // Don't add error messages to the translated text area
-        // Just log the error and leave the translation area empty for this chunk
-        console.warn("Skipping translation for this chunk due to errors");
       }
+    } catch (error) {
+      console.error("Translation error:", error);
+      // Don't add error messages to the translated text area
+      // Just log the error and leave the translation area empty for this chunk
+      console.warn("Skipping translation for this chunk due to errors");
     } finally {
       isTranslating = false;
     }

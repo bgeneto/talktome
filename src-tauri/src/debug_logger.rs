@@ -1,4 +1,3 @@
-use serde_json::Value;
 use std::io::Write;
 use std::path::PathBuf;
 use std::sync::Mutex;
@@ -206,37 +205,7 @@ impl DebugLogger {
         Self::write_log(&format!("TRANSLATION_REQUEST: Full prompt: '{}'", prompt));
     }
 
-    /// Log translation API request payload
-    pub fn log_api_payload(payload: &Value, endpoint: &str) {
-        Self::write_log(&format!("API_REQUEST: Sending request to {}", endpoint));
-        Self::write_log(&format!(
-            "API_REQUEST: Full payload: {}",
-            serde_json::to_string_pretty(payload).unwrap_or_default()
-        ));
 
-        // Log specific important fields
-        if let Some(messages) = payload["messages"].as_array() {
-            for (i, msg) in messages.iter().enumerate() {
-                if let (Some(role), Some(content)) = (msg["role"].as_str(), msg["content"].as_str())
-                {
-                    Self::write_log(&format!(
-                        "API_REQUEST: Message[{}] role={}, content_length={}",
-                        i,
-                        role,
-                        content.len()
-                    ));
-                    Self::write_log(&format!(
-                        "API_REQUEST: Message[{}] content: '{}'",
-                        i, content
-                    ));
-                }
-            }
-        }
-
-        if let Some(model) = payload["model"].as_str() {
-            Self::write_log(&format!("API_REQUEST: Using model: {}", model));
-        }
-    }
 
     /// Log translation response
     pub fn log_translation_response(
