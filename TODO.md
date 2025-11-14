@@ -6,24 +6,11 @@
 - [x] Frontend synchronization with persistent store
 - [x] Hotkey FSM module with tests
 - [x] Documentation in CHANGES.md
+- [x] Hotkey FSM integration into hotkey handler
+- [x] Frontend FSM state checking and synchronization
+- [x] Sync FSM state with recording start/stop commands
 
 ## In Progress 🚀
-
-### Phase 2: Hotkey Stability (Priority 2)
-- [ ] Integrate HotkeySM into `register_hotkeys()` command
-  - **File**: `src-tauri/src/lib.rs`
-  - **Task**: Replace current hotkey debouncing logic with FSM
-  - **Details**: Update hotkey handler to use `HotkeySM::try_toggle()` method
-  
-- [ ] Sync button UI state with recording state
-  - **File**: `src/routes/+page.svelte` 
-  - **Task**: Bind recording button state to actual FSM state
-  - **Details**: Ensure button reflects true state from backend
-
-- [ ] Add integration tests for hotkey triggering
-  - **File**: `src-tauri/tests/hotkey_integration_test.rs` (NEW)
-  - **Task**: Test actual hotkey registration and toggle behavior
-  - **Details**: Simulate key presses and verify state transitions
 
 ### Phase 3: Code Quality (Priority 3)
 - [ ] Run `cargo fmt --all -- --check` and fix formatting
@@ -186,8 +173,9 @@ cargo build --release
 |------|--------|------------------|---------------|-------|
 | Settings persistence | ✅ Complete | 2h | 2h | Store plugin integrated, frontend synced |
 | Hotkey FSM module | ✅ Complete | 1h | 1h | Module created with tests |
-| Hotkey FSM integration | ⏳ In Progress | 1.5h | - | Awaiting next phase |
-| Code quality fixes | 📋 Planned | 1h | - | cargo fmt/clippy |
+| Hotkey FSM integration | ✅ Complete | 1.5h | 1.5h | Integrated into handler, synced with states |
+| Frontend FSM checking | ✅ Complete | 0.5h | 0.5h | Added checkFsmState() helper |
+| Code quality fixes | ⏳ In Progress | 1h | - | cargo fmt/clippy next |
 | Tests & validation | 📋 Planned | 2h | - | Unit + integration tests |
 | Documentation | ✅ Complete | 1h | 1h | CHANGES.md and TODO.md created |
 
