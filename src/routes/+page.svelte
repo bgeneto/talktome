@@ -326,7 +326,6 @@
         processingStatus = ""; // Clear processing status
 
         console.log("Frontend state synced: isRecording=", isRecording, "isListening=", isListening);
-        showTrayNotification("Recording stopped");
       });
 
       // Listen to backend recording-started to sync frontend state
@@ -414,16 +413,7 @@
         });
         // State already set to true above, confirm it's still correct
         console.log("Recording started successfully, isRecording confirmed:", isRecording);
-        
-        // Show recording started notification
-        try {
-          invoke("show_recording_started_notification").catch(error => {
-            console.warn("Failed to show recording started notification:", error);
-          });
-        } catch (error) {
-          console.warn("Failed to invoke recording started notification:", error);
-        }
-        
+
         // Only clear previous session text if the previous session ended
         if (sessionEnded) {
           originalChunks = [];
@@ -432,7 +422,6 @@
           sessionEnded = false;
         }
         useWebSpeechAPI = false;
-        showTrayNotification("Recording started");
       } catch (error) {
         console.error("Failed to start recording with Rust backend:", error);
         // Reset state on failure
@@ -514,8 +503,8 @@
 
   async function stopRecording() {
     console.log("stopRecording() called - call stack:", new Error().stack);
-    
-    // Show recording stopped notification immediately (non-blocking)
+
+    // Show immediate system notification that recording is stopping
     try {
       invoke("show_recording_stopped_notification").catch(error => {
         console.warn("Failed to show recording stopped notification:", error);
@@ -523,7 +512,7 @@
     } catch (error) {
       console.warn("Failed to invoke recording stopped notification:", error);
     }
-    
+
     if (useWebSpeechAPI) {
       isRecording = false;
       isListening = false;

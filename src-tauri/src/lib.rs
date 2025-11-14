@@ -409,14 +409,14 @@ async fn show_recording_stopped_notification(
     _recording_state: State<'_, RecordingState>
 ) -> Result<(), String> {
     DebugLogger::log_info("Showing recording stopped notification");
-    
+
     app.notification()
         .builder()
         .title("Recording Stopped")
         .body("⏳ Processing audio...")
         .show()
         .map_err(|e| e.to_string())?;
-        
+
     Ok(())
 }
 
@@ -1118,12 +1118,12 @@ async fn start_recording(
             DebugLogger::log_info("RECORDING_STATE_CHANGE: Set to false in pipeline cleanup (natural termination)");
             DebugLogger::log_info("Recording state set to false");
         }
-        // Show notification immediately when processing starts, not when it ends
-        DebugLogger::log_info("Showing recording stopped notification IMMEDIATELY");
+        // Show completion notification when processing ends
+        DebugLogger::log_info("Showing processing completed notification");
         let _ = app.notification()
             .builder()
-            .title("Recording Stopped")
-            .body("⏳ Processing audio...")
+            .title("Processing completed")
+            .body("✍️ Text copied to clipboard")
             .show();
 
         // Emit recording-stopped event AFTER transcription has been shown to frontend
