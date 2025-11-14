@@ -1,13 +1,15 @@
 <script lang="ts">
   import { onMount } from "svelte";
   import { get } from "svelte/store";
-  import { settings } from "../../lib/stores/settingsStore";
+  import { settings, type Settings } from "../../lib/stores/settingsStore";
 
+  // Initialize from store instead of hardcoded defaults
+  const initialSettings: Settings = get(settings);
   let currentSettings = {
-    apiEndpoint: "https://api.openai.com/v1",
-    apiKey: "",
-    sttModel: "whisper-large-v3",
-    translationModel: "gpt-4o",
+    apiEndpoint: initialSettings.apiEndpoint,
+    apiKey: initialSettings.apiKey,
+    sttModel: initialSettings.sttModel,
+    translationModel: initialSettings.translationModel,
   };
 
   let saveSuccess = false;
@@ -47,32 +49,29 @@
   let isDiagnosing = false;
   let diagnosticError: string | null = null;
 
-  onMount(async () => {
+  onMount(() => {
     // Ensure settings are fully loaded from persistent store before using them
-    await settings.ensureSettingsLoaded();
-    console.log("Settings fully loaded, now subscribing");
-    
-    // Subscribe to settings changes
-    const unsubscribe = settings.subscribe((s) => {
-      console.log("API Settings page - settings updated from store:", {
+    settings.ensureSettingsLoaded().then(() => {
+      console.log("Settings fully loaded, updating current settings");
+      // Load initial values from store once
+      const s: Settings = get(settings);
+      currentSettings = {
         apiEndpoint: s.apiEndpoint,
+        apiKey: s.apiKey,
         sttModel: s.sttModel,
         translationModel: s.translationModel,
-      });
-      currentSettings = {
-        apiEndpoint: s.apiEndpoint || "https://api.openai.com/v1",
-        apiKey: s.apiKey || "",
-        sttModel: s.sttModel || "whisper-large-v3",
-        translationModel: s.translationModel || "gpt-3.5-turbo",
       };
-      console.log("Current settings updated:", {
+      console.log("Current settings initialized:", {
+        apiEndpoint: currentSettings.apiEndpoint,
         translationModel: currentSettings.translationModel,
-        availableTranslationModels: availableTranslationModels.length,
       });
     });
 
     // Load API key from backend storage
-    settings.loadApiKeyFromBackend().catch((error: unknown) => {
+    settings.loadApiKeyFromBackend().then(() => {
+      const s: Settings = get(settings);
+      currentSettings.apiKey = s.apiKey;
+    }).catch((error: unknown) => {
       console.log("No API key found in backend storage");
     });
 
@@ -83,8 +82,6 @@
         loadAvailableTranslationModels();
       }
     }, 100);
-
-    return () => unsubscribe();
   });
 
   async function loadAvailableModels() {
@@ -175,7 +172,7 @@
     try {
       // Call individual setters which handle localStorage and backend sync
       if (updated.hasOwnProperty("apiEndpoint")) {
-        settings.setApiEndpoint(updated.apiEndpoint!);
+        await settings.setApiEndpoint(updated.apiEndpoint!);
       }
 
       if (updated.hasOwnProperty("apiKey")) {
@@ -183,16 +180,13 @@
       }
 
       if (updated.hasOwnProperty("sttModel")) {
-        settings.setSttModel(updated.sttModel!);
+        await settings.setSttModel(updated.sttModel!);
       }
 
       if (updated.hasOwnProperty("translationModel")) {
         console.log("Setting translation model to:", updated.translationModel);
-        settings.setTranslationModel(updated.translationModel!);
+        await settings.setTranslationModel(updated.translationModel!);
       }
-
-      // Give setters time to complete their async operations
-      await new Promise(resolve => setTimeout(resolve, 100));
     } catch (error) {
       console.error("Failed to persist settings:", error);
       throw error;
@@ -339,13 +333,13 @@
         </div>
 
         <div>
-          <label
-            for="apiKey"
-            class="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2"
-          >
-            API Key
-          </label>
-          <div class="flex items-center justify-end mb-2">
+          <div class="flex items-center justify-between mb-2">
+            <label
+              for="apiKey"
+              class="block text-sm font-medium text-gray-700 dark:text-gray-300"
+            >
+              API Key
+            </label>
             <button
               on:click={() => (showApiKey = !showApiKey)}
               class="px-3 py-1 text-xs bg-gray-100 dark:bg-gray-700 text-gray-600 dark:text-gray-300 rounded hover:bg-gray-200 dark:hover:bg-gray-600 transition-colors flex items-center"

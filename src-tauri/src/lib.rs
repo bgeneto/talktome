@@ -1686,7 +1686,10 @@ pub fn run() {
     .plugin(tauri_plugin_opener::init())
     .plugin(tauri_plugin_global_shortcut::Builder::new().build())
     .plugin(tauri_plugin_notification::init())
-    .plugin(tauri_plugin_store::Builder::default().build())
+    .plugin(
+        tauri_plugin_store::Builder::new()
+            .build()
+    )
         // Register Stronghold plugin for encrypted at-rest storage (JS guest APIs available)
         .setup(|app| {
             // Initialize Stronghold plugin for encrypted storage

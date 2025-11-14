@@ -23,7 +23,7 @@ impl Default for PersistentSettings {
     fn default() -> Self {
         Self {
             spoken_language: "auto".to_string(),
-            translation_language: "none".to_string(),
+            translation_language: "en".to_string(),
             audio_device: "default".to_string(),
             theme: "auto".to_string(),
             api_endpoint: "https://api.openai.com/v1".to_string(),
@@ -42,17 +42,17 @@ impl Default for PersistentSettings {
 pub struct SettingsStore;
 
 impl SettingsStore {
-    const STORE_NAME: &'static str = "talktome-settings";
+    const STORE_FILE: &'static str = "talktome-settings.dat";
     const SETTINGS_KEY: &'static str = "app-settings";
 
     pub fn load(app: &AppHandle) -> Result<PersistentSettings, String> {
         let store = app
-            .store(Self::STORE_NAME)
-            .map_err(|e| format!("Failed to open store: {}", e))?;
+            .store(Self::STORE_FILE)
+            .map_err(|e| format!("Failed to open store '{}': {}", Self::STORE_FILE, e))?;
 
         match store.get(Self::SETTINGS_KEY) {
             Some(value) => {
-                let settings = serde_json::from_value::<PersistentSettings>(value)
+                let settings = serde_json::from_value::<PersistentSettings>(value.clone())
                     .map_err(|e| format!("Failed to deserialize settings: {}", e))?;
                 crate::debug_logger::DebugLogger::log_info(&format!("Loaded persistent settings from store: spoken_language={}, translation_language={}", settings.spoken_language, settings.translation_language));
                 Ok(settings)
@@ -66,17 +66,18 @@ impl SettingsStore {
 
     pub fn save(app: &AppHandle, settings: &PersistentSettings) -> Result<(), String> {
         let store = app
-            .store(Self::STORE_NAME)
-            .map_err(|e| format!("Failed to open store: {}", e))?;
+            .store(Self::STORE_FILE)
+            .map_err(|e| format!("Failed to open store '{}': {}", Self::STORE_FILE, e))?;
 
         let value = serde_json::to_value(settings)
             .map_err(|e| format!("Failed to serialize settings: {}", e))?;
 
         store.set(Self::SETTINGS_KEY.to_string(), value);
-
+        
+        // Force immediate save to disk
         store
             .save()
-            .map_err(|e| format!("Failed to sync store: {}", e))?;
+            .map_err(|e| format!("Failed to save store to disk: {}", e))?;
 
         crate::debug_logger::DebugLogger::log_info(&format!("Saved persistent settings to store: spoken_language={}, translation_language={}", settings.spoken_language, settings.translation_language));
         Ok(())

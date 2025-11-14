@@ -104,7 +104,7 @@
     console.log("Saved to localStorage:", finalTheme);
   }
 
-  function persistSettings(updated: Partial<typeof currentSettings>) {
+  async function persistSettings(updated: Partial<typeof currentSettings>) {
     const merged = { ...get(settings), ...updated };
     localStorage.setItem("talktome-settings", JSON.stringify(merged));
     // Cast since the store's Settings type includes extra fields we preserve from get(settings)
@@ -112,19 +112,19 @@
 
     // Use proper setters to ensure backend sync instead of old individual commands
     if (updated.hasOwnProperty("autoMute")) {
-      settings.setAutoMute(updated.autoMute!);
+      await settings.setAutoMute(updated.autoMute!);
     }
 
     if (updated.hasOwnProperty("debugLogging")) {
-      settings.setDebugLogging(updated.debugLogging!);
+      await settings.setDebugLogging(updated.debugLogging!);
     }
 
     if (updated.hasOwnProperty("textInsertionEnabled")) {
-      settings.setTextInsertionEnabled(updated.textInsertionEnabled!);
+      await settings.setTextInsertionEnabled(updated.textInsertionEnabled!);
     }
 
     if (updated.hasOwnProperty("theme")) {
-      settings.setTheme(updated.theme!);
+      await settings.setTheme(updated.theme!);
     }
   }
 
@@ -422,12 +422,12 @@ Formatted: ${formatHotkeyFromEvent(e)}
       }
 
       // Save settings
-      persistSettings(currentSettings);
+      await persistSettings(currentSettings);
 
       // Update hotkeys in the backend
       if (currentSettings.hotkeys) {
         const { handsFree } = currentSettings.hotkeys;
-        settings.updateHotkeys({ handsFree });
+        await settings.updateHotkeys({ handsFree });
       }
 
       // Visual feedback
@@ -437,7 +437,14 @@ Formatted: ${formatHotkeyFromEvent(e)}
       }, 3000);
     } catch (error) {
       console.error("Error during save:", error);
-      saveError = "Failed to save preferences. Please try again.";
+      // Show the actual error message
+      if (error instanceof Error) {
+        saveError = `Failed to save preferences: ${error.message}`;
+      } else if (typeof error === 'string') {
+        saveError = `Failed to save preferences: ${error}`;
+      } else {
+        saveError = "Failed to save preferences. Please try again.";
+      }
     } finally {
       isSaving = false;
     }
