@@ -1026,14 +1026,16 @@ async fn start_recording(
                     match stt_service_single.transcribe_chunk(all_audio_data, sample_rate, Some("stt_single")).await {
                             Ok(transcription) => {
                                 DebugLogger::log_info(&format!("STT complete transcription: '{}'", transcription));
-                                
-                                // IMMEDIATELY emit raw transcription to frontend (don't wait for translation)
+                        // IMMEDIATELY emit raw transcription to frontend (don't wait for translation)
                                 let _ = app_single.emit("transcribed-text", serde_json::json!({
                                     "raw": transcription,
                                     "final": "" // Empty final initially - will be updated when translation completes
                                 }));
                                 DebugLogger::log_info("EMIT: Sent raw transcription immediately to frontend");
-                                
+
+                                // Emit processing progress to show translation is happening
+                                let _ = app_single.emit("processing-status", serde_json::json!({"status": "translating"}));
+
                                 // Now do translation/correction in background and emit update when done
                                 let final_text = if let Some(ref translation_service) = translation_service_single {
                                     match translation_service.process_text(
@@ -1044,28 +1046,28 @@ async fn start_recording(
                                     ).await {
                                         Ok(processed_text) => {
                                             DebugLogger::log_translation_response(true, Some(&processed_text), None, None);
-                                            
-                                            // Emit updated transcription with final processed text
+
+                                            // EMIT FINAL PROCESSED TEXT
                                             let _ = app_single.emit("transcribed-text", serde_json::json!({
                                                 "raw": transcription,
                                                 "final": processed_text
                                             }));
                                             DebugLogger::log_info("EMIT: Sent final processed text to frontend");
-                                            
+
                                             processed_text
                                         },
                                         Err(e) => {
                                             DebugLogger::log_translation_response(false, None, Some(&e), None);
                                             DebugLogger::log_pipeline_error("translation", &e);
                                             let _ = app_single.emit("processing-error", format!("Translation Error - Using fallback: {}", e));
-                                            
-                                            // Even if translation fails, emit the raw transcription as final
+
+                                            // FALLBACK: Use raw transcription as final (don't leave empty)
                                             let _ = app_single.emit("transcribed-text", serde_json::json!({
                                                 "raw": transcription,
-                                                "final": transcription // Use raw transcription as fallback
+                                                "final": transcription // Use raw as fallback
                                             }));
                                             DebugLogger::log_info("EMIT: Sent raw transcription as fallback final text");
-                                            
+
                                             transcription.clone()
                                         }
                                     }
@@ -1076,9 +1078,12 @@ async fn start_recording(
                                         "final": transcription
                                     }));
                                     DebugLogger::log_info("EMIT: Sent raw transcription as final (no translation service)");
-                                    
+
                                     transcription.clone()
                                 };
+
+                                // CLEAR PROCESSING STATUS after completion
+                                let _ = app_single.emit("processing-status", serde_json::json!({"status": ""}));
                                 
                                 // In single recording mode, the recording has already stopped, so insert text
                                 if settings_single.text_insertion_enabled {
@@ -1115,18 +1120,15 @@ async fn start_recording(
         }
         
         DebugLogger::log_info("Emitting recording-stopped event to frontend");
-        let _ = app.emit("recording-stopped", ());
-        
-        // Show recording stopped notification (only once per session)
-        DebugLogger::log_info("Showing recording stopped notification");
-        app.notification()
+        let _ = app.emit("recording-stopped", {});
+
+        // Show notification immediately when processing starts, not when it ends
+        DebugLogger::log_info("Showing recording stopped notification IMMEDIATELY");
+        let _ = app.notification()
             .builder()
-            .title("Recording Complete")
-            .body("🎯 Audio processed successfully!")
-            .show()
-            .unwrap_or_else(|e| {
-                DebugLogger::log_info(&format!("Failed to show recording stopped notification: {}", e));
-            });
+            .title("Recording Stopped")
+            .body("⏳ Processing audio...")
+            .show();
             
         DebugLogger::log_info("=== PIPELINE CLEANUP COMPLETE ===");
     });

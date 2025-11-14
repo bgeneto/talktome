@@ -14,6 +14,7 @@
   let selectedSourceLang = "auto";
   let selectedTargetLang = "en";
   let isTranslating = false;
+  let processingStatus = "";
   let audioLevel = 0;
   let isListening = false;
   let showNotification = false;
@@ -58,6 +59,7 @@
   let unlistenRecordingStopped: () => void = () => {};
   let unlistenRecordingStarted: () => void = () => {};
   let unlistenRecordingTimeout: () => void = () => {};
+  let unlistenProcessingStatus: () => void = () => {};
 
   // Flag to indicate the previous transcription session ended. We only
   // clear accumulated UI text when starting a new session after the prior
@@ -286,13 +288,13 @@
               syncDisplays(); // Show transcribed text immediately
             }
 
-            // Check if we have processed/corrected text from backend
-            if (final && final !== raw) {
-              // Backend provided processed/corrected text (could be translation or just correction)
+            // Always populate translated text - either from backend processing or as fallback
+            if (final && final.trim()) {
+              // Backend provided processed text (could be translated, corrected, or fallback)
               pushChunkDedup(translatedChunks, final);
               syncDisplays(); // Update with processed text
             } else {
-              // Check if client-side translation is needed
+              // No final text from backend - check if client-side translation is needed
               const translationEnabledUI =
                 selectedTargetLang &&
                 selectedTargetLang !== "none" &&
@@ -303,6 +305,10 @@
                 translateText(raw, { append: true }).catch((err) => {
                   console.error("Background translation failed:", err);
                 });
+              } else if (raw) {
+                // No translation enabled - just use raw text as final
+                pushChunkDedup(translatedChunks, raw);
+                syncDisplays();
               }
             }
             // Note: translatedChunks now contains either translated text OR corrected text
@@ -313,13 +319,14 @@
       // Listen to backend recording-stopped to mark session ended
       unlistenRecordingStopped = await listen("recording-stopped", () => {
         console.log("Backend recording-stopped event received, syncing frontend state");
-        
+
         // Update recording state
         isRecording = false;
         isListening = false;
         sessionEnded = true;
         audioLevel = 0;
-        
+        processingStatus = ""; // Clear processing status
+
         console.log("Frontend state synced: isRecording=", isRecording, "isListening=", isListening);
         showTrayNotification("Recording stopped");
       });
@@ -348,6 +355,15 @@
         sessionEnded = true;
         showTrayNotification("Recording stopped - time limit exceeded");
       });
+
+      // Listen for processing status updates
+      unlistenProcessingStatus = await listen("processing-status", (event) => {
+        const payload: any = event.payload;
+        if (payload && payload.status) {
+          processingStatus = payload.status;
+          console.log("Processing status update:", processingStatus);
+        }
+      });
     })();
 
     return () => {
@@ -360,6 +376,7 @@
       unlistenRecordingStopped();
       unlistenRecordingStarted();
       unlistenRecordingTimeout();
+      unlistenProcessingStatus();
     };
   });
 
@@ -709,17 +726,25 @@
     </button>
   </div>
 
-  <!-- Status Indicator -->
-  {#if isRecording}
-    <div class="text-center mb-4">
+  <!-- Status Indicators -->
+  <div class="text-center mb-4 space-y-2">
+    {#if isRecording}
       <div
         class="inline-flex items-center px-4 py-2 bg-red-100 text-red-800 rounded-full text-sm font-medium dark:bg-red-900 dark:text-red-300"
       >
         <div class="w-2 h-2 bg-red-500 rounded-full mr-2 animate-pulse"></div>
         Recording...
       </div>
-    </div>
-  {/if}
+    {/if}
+    {#if processingStatus}
+      <div
+        class="inline-flex items-center px-4 py-2 bg-blue-100 text-blue-800 rounded-full text-sm font-medium dark:bg-blue-900 dark:text-blue-300"
+      >
+        <div class="w-2 h-2 bg-blue-500 rounded-full mr-2 animate-spin"></div>
+        {processingStatus === "translating" ? "Translating..." : processingStatus}
+      </div>
+    {/if}
+  </div>
 
   <!-- Text Results -->
   <div class="grid grid-cols-1 lg:grid-cols-2 gap-6 mb-6">

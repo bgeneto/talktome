@@ -19,7 +19,7 @@ impl STTService {
         spoken_language: String,
     ) -> Self {
         let client = reqwest::Client::builder()
-            .timeout(Duration::from_secs(30))
+            .timeout(Duration::from_secs(15)) // Reduced from 30s for better UX
             .build()
             .unwrap_or_default();
 
@@ -67,13 +67,16 @@ impl STTService {
 
         // Convert f32 samples to i16 for WAV encoding
         DebugLogger::log_info("STT: Converting audio to WAV format");
+        let encoding_start = std::time::Instant::now();
         let audio_bytes = self.encode_wav(&audio_data, sample_rate).map_err(|e| {
             let error_msg = format!("Audio encoding error: {}", e);
             DebugLogger::log_pipeline_error("stt", &error_msg);
             error_msg
         })?;
+        let encoding_duration = encoding_start.elapsed();
         DebugLogger::log_info(&format!(
-            "STT: WAV encoding complete, output size={} bytes",
+            "STT: WAV encoding complete in {:.2}s, output size={} bytes",
+            encoding_duration.as_secs_f32(),
             audio_bytes.len()
         ));
 
@@ -146,6 +149,7 @@ impl STTService {
             DebugLogger::log_info("STT: Multipart form created successfully");
 
             DebugLogger::log_info("STT: Sending HTTP POST request");
+            let api_start = std::time::Instant::now();
             let response = self
                 .client
                 .post(&url)
@@ -153,6 +157,8 @@ impl STTService {
                 .multipart(form)
                 .send()
                 .await;
+            let api_duration = api_start.elapsed();
+            DebugLogger::log_info(&format!("STT: API request took {:.2}s", api_duration.as_secs_f32()));
 
             match response {
                 Ok(resp) => {
