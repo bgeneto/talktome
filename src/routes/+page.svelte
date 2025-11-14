@@ -195,6 +195,18 @@
         console.error("Failed to register hotkeys:", error);
       }
 
+      // Helper to check FSM state from backend
+      const checkFsmState = async () => {
+        try {
+          const fsmState = await invoke("get_hotkey_fsm_state") as string;
+          console.log("Hotkey FSM state:", fsmState);
+          return fsmState === "Recording";
+        } catch (error) {
+          console.log("Could not get FSM state (FSM may not be available):", error);
+          return null;
+        }
+      };
+
       unlistenToggleHK = await listen("toggle-recording-from-hotkey", async () => {
         console.log("toggle-recording-from-hotkey event received, frontend isRecording:", isRecording);
         if (!guard()) {
@@ -205,7 +217,9 @@
         // Always check backend state before deciding action to avoid race conditions
         try {
           const backendRecordingState = await invoke("get_recording_status") as boolean;
-          console.log("Backend recording state:", backendRecordingState, "Frontend state:", isRecording);
+          const fsmRecordingState = await checkFsmState();
+          
+          console.log("Backend recording state:", backendRecordingState, "FSM state:", fsmRecordingState, "Frontend state:", isRecording);
           
           // Use backend state as authoritative source
           if (backendRecordingState) {
