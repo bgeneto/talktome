@@ -1,5 +1,5 @@
 <script lang="ts">
-  let appVersion = "0.3.0";
+  let appVersion = "0.4.3";
   let buildDate = "2025-08-19";
   let platform = "Windows";
   let architecture = "x64";

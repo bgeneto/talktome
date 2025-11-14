@@ -3,7 +3,7 @@ use serde_json::json;
 use keyring::Entry;
 use std::path::PathBuf;
 use tauri::{AppHandle, Manager};
-use tauri_plugin_store::{StoreBuilder, StoreExt};
+use tauri_plugin_store::StoreBuilder;
 use serde_json::Value;
 
 /// Helper function to convert JSON value to u64
@@ -65,7 +65,8 @@ impl Default for AppSettings {
 impl AppSettings {
     /// Load settings from persistent Tauri store
     pub fn load(app_handle: &AppHandle) -> Result<Self, String> {
-        let store = StoreBuilder::new(app_handle, ".settings.dat").build();
+        let store = StoreBuilder::new(app_handle, ".settings.dat").build()
+            .map_err(|e| format!("Failed to build store: {}", e))?;
 
         let settings = Self::default();
 
@@ -116,7 +117,7 @@ impl AppSettings {
                 .and_then(|v| v.as_bool())
                 .unwrap_or(settings.audio_chunking_enabled),
             max_recording_time_minutes: store.get("max_recording_time_minutes")
-                .and_then(|v| as_u64(v))
+                .and_then(|v| as_u64(&v))
                 .unwrap_or(settings.max_recording_time_minutes as u64) as u32,
         };
 
@@ -128,28 +129,30 @@ impl AppSettings {
 
     /// Save settings to persistent Tauri store
     pub fn save(&self, app_handle: &AppHandle) -> Result<(), String> {
-        let store = StoreBuilder::new(app_handle, ".settings.dat").build();
+        let store = StoreBuilder::new(app_handle, ".settings.dat").build()
+            .map_err(|e| format!("Failed to build store: {}", e))?;
 
         // Save each field to store
-        store.insert("spoken_language", self.spoken_language.clone())?;
-        store.insert("translation_language", self.translation_language.clone())?;
-        store.insert("audio_device", self.audio_device.clone())?;
-        store.insert("theme", self.theme.clone())?;
-        store.insert("auto_save", self.auto_save)?;
-        store.insert("api_endpoint", self.api_endpoint.clone())?;
-        store.insert("stt_model", self.stt_model.clone())?;
-        store.insert("translation_model", self.translation_model.clone())?;
-        store.insert("hotkeys_hands_free", self.hotkeys.hands_free.clone())?;
-        store.insert("auto_mute", self.auto_mute)?;
-        store.insert("translation_enabled", self.translation_enabled)?;
-        store.insert("debug_logging", self.debug_logging)?;
-        store.insert("text_insertion_enabled", self.text_insertion_enabled)?;
+        store.set("spoken_language", serde_json::json!(self.spoken_language.clone()));
+        store.set("translation_language", serde_json::json!(self.translation_language.clone()));
+        store.set("audio_device", serde_json::json!(self.audio_device.clone()));
+        store.set("theme", serde_json::json!(self.theme.clone()));
+        store.set("auto_save", serde_json::json!(self.auto_save));
+        store.set("api_endpoint", serde_json::json!(self.api_endpoint.clone()));
+        store.set("stt_model", serde_json::json!(self.stt_model.clone()));
+        store.set("translation_model", serde_json::json!(self.translation_model.clone()));
+        store.set("hotkeys_hands_free", serde_json::json!(self.hotkeys.hands_free.clone()));
+        store.set("auto_mute", serde_json::json!(self.auto_mute));
+        store.set("translation_enabled", serde_json::json!(self.translation_enabled));
+        store.set("debug_logging", serde_json::json!(self.debug_logging));
+        store.set("text_insertion_enabled", serde_json::json!(self.text_insertion_enabled));
         // Always save audio_chunking_enabled as false for reliability
-        store.insert("audio_chunking_enabled", false)?;
-        store.insert("max_recording_time_minutes", self.max_recording_time_minutes)?;
+        store.set("audio_chunking_enabled", serde_json::json!(false));
+        store.set("max_recording_time_minutes", serde_json::json!(self.max_recording_time_minutes));
 
         // Save the store to disk
-        store.save()?;
+        store.save()
+            .map_err(|e| format!("Failed to save store: {}", e))?;
 
         Ok(())
     }

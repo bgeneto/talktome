@@ -136,10 +136,12 @@
   }
 
   function toggleSidebar() {
+    console.log("[DEBUG] toggleSidebar clicked");
     sidebarCollapsed = !sidebarCollapsed;
   }
 
   function navigateTo(route: string, label: string) {
+    console.log("[DEBUG] navigateTo called with route:", route, "label:", label);
     currentPage = label;
     goto(route);
   }
@@ -192,7 +194,10 @@
           </div>
         {/if}
         <button
-          on:click={toggleSidebar}
+          on:click={(e) => {
+            console.log("[DEBUG] Sidebar toggle button clicked, event:", e);
+            toggleSidebar();
+          }}
           class="p-2 rounded-lg hover:bg-gray-100 dark:hover:bg-gray-700 transition-colors {sidebarCollapsed
             ? 'mx-auto'
             : ''}"
@@ -213,7 +218,10 @@
       <nav class="flex-1 p-4 space-y-2">
         {#each navigationItems as item}
           <button
-            on:click={() => navigateTo(item.route, item.label)}
+            on:click={(e) => {
+              console.log("[DEBUG] Navigation button clicked for route:", item.route, "event:", e);
+              navigateTo(item.route, item.label);
+            }}
             class="w-full flex items-center {sidebarCollapsed
               ? 'px-3 py-3 justify-center'
               : 'px-3 py-2 justify-start'} text-sm font-medium rounded-lg transition-colors duration-200 {$page

@@ -18,7 +18,6 @@ interface Settings {
   textInsertionEnabled: boolean;
   audioChunkingEnabled: boolean;
   maxRecordingTimeMinutes: number;
-  quickAccessLanguages: string[];
   vad: {
     speechThreshold: number; // Energy threshold for speech detection
     silenceThreshold: number; // Energy threshold for silence
@@ -46,7 +45,6 @@ const defaultSettings: Settings = {
   textInsertionEnabled: true,
   audioChunkingEnabled: false, // Default to false
   maxRecordingTimeMinutes: 2, // Default to 5 minutes for safety
-  quickAccessLanguages: [],
   vad: {
     speechThreshold: 0.001, // Sensitive for real-time
     silenceThreshold: 0.0005, // Low silence threshold
@@ -84,7 +82,6 @@ function createSettingsStore() {
           textInsertionEnabled: backendSettings.text_insertion_enabled ?? defaultSettings.textInsertionEnabled,
           audioChunkingEnabled: false, // Always force to false for reliability
           maxRecordingTimeMinutes: backendSettings.max_recording_time_minutes || defaultSettings.maxRecordingTimeMinutes,
-          quickAccessLanguages: defaultSettings.quickAccessLanguages,
           vad: defaultSettings.vad,
           apiKey: "", // Never load API key from backend store - it's stored separately
         };
@@ -200,12 +197,6 @@ function createSettingsStore() {
         setTimeout(() => {
           saveToPersistentStore();
         }, 0);
-        return newSettings;
-      });
-    },
-    setQuickAccessLanguages: (languages: string[]) => {
-      update((settings) => {
-        const newSettings = { ...settings, quickAccessLanguages: languages };
         return newSettings;
       });
     },

@@ -8,6 +8,13 @@
     "opener:default",
     "core:tray:default",
     "core:menu:default",
-    "notification:default"
+    "notification:default",
+    "store:allow-load",
+    "store:allow-save",
+    "store:allow-get",
+    "store:allow-set",
+    "store:allow-delete",
+    "store:allow-has",
+    "store:default"
   ]
 }

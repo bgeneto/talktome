@@ -295,7 +295,7 @@ async fn register_hotkeys(
 
         // Register handler to emit an event when the shortcut is triggered
         let action_clone = action.clone();
-        let app_for_emit = app.clone();
+        let _app_for_emit = app.clone();
         global_shortcut
             .on_shortcut(shortcut, move |app_handle, _sc, ev| {
                 // Only handle Pressed events for deterministic behavior
@@ -1657,7 +1657,7 @@ async fn save_persistent_settings(app: AppHandle, settings: AppSettings) -> Resu
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
-pub fn run() {
+pub fn run() -> Result<(), tauri::Error> {
     tauri::Builder::default()
     .plugin(tauri_plugin_opener::init())
     .plugin(tauri_plugin_global_shortcut::Builder::new().build())

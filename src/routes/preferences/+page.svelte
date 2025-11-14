@@ -1,5 +1,6 @@
 <script lang="ts">
   import { onMount } from "svelte";
+  import { browser } from "$app/environment";
   import { get } from "svelte/store";
   import { invoke } from "@tauri-apps/api/core";
   import { settings } from "../../lib/stores/settingsStore";
@@ -23,18 +24,24 @@
 
   onMount(() => {
     // Subscribe to settings changes
-    const unsubscribe = settings.subscribe((s) => {
+    const unsubscribe = settings.subscribe((s: any) => {
       currentSettings = { ...s };
     });
 
-    // Load data directory info
-    loadDataDirectoryInfo();
+    // Load data directory info (only on client/browser)
+    if (browser) {
+      loadDataDirectoryInfo();
+    }
 
     return () => unsubscribe();
   });
 
   async function loadDataDirectoryInfo() {
     try {
+      if (typeof invoke !== "function") {
+        console.warn("invoke is not available yet, skipping data directory load");
+        return;
+      }
       dataDirectoryInfo = await invoke("get_data_directory_info");
     } catch (error) {
       console.error("Failed to load data directory info:", error);

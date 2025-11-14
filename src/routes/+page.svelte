@@ -55,9 +55,11 @@
   let unlistenAudioDevice: () => void = () => {};
   let unlistenTranscriptionUpdate: () => void = () => {};
   let unlistenToggleHK: () => void = () => {};
+  let unlistenStopHK: () => void = () => {};
   let unlistenRecordingStopped: () => void = () => {};
   let unlistenRecordingStarted: () => void = () => {};
   let unlistenRecordingTimeout: () => void = () => {};
+  let unlistenLegacyToggleHK: () => void = () => {};
 
   // Flag to indicate the previous transcription session ended. We only
   // clear accumulated UI text when starting a new session after the prior
@@ -134,29 +136,39 @@
 
   onMount(() => {
     // Listen for tray menu events
-    (async () => {
-      unlistenSpokenLanguage = await listen(
-        "tray-spoken-language-change",
-        (event) => {
-          const language = event.payload as string;
-          settings.setSpokenLanguage(language);
-          selectedSourceLang = language;
-        }
-      );
+    const setupListeners = async () => {
+      // Check if listen is available
+      if (typeof listen !== "function") {
+        console.warn("Tauri listen function not available, skipping event listener setup");
+        return;
+      }
 
-      unlistenTranslationLanguage = await listen(
-        "tray-translation-language-change",
-        (event) => {
-          const language = event.payload as string;
-          settings.setTranslationLanguage(language);
-          selectedTargetLang = language;
-        }
-      );
+      try {
+        unlistenSpokenLanguage = await listen(
+          "tray-spoken-language-change",
+          (event: any) => {
+            const language = event.payload as string;
+            settings.setSpokenLanguage(language);
+            selectedSourceLang = language;
+          }
+        );
 
-      unlistenAudioDevice = await listen("tray-audio-input-change", (event) => {
-        const device = event.payload as string;
-        settings.setAudioDevice(device);
-      });
+        unlistenTranslationLanguage = await listen(
+          "tray-translation-language-change",
+          (event: any) => {
+            const language = event.payload as string;
+            settings.setTranslationLanguage(language);
+            selectedTargetLang = language;
+          }
+        );
+
+        unlistenAudioDevice = await listen("tray-audio-input-change", (event: any) => {
+          const device = event.payload as string;
+          settings.setAudioDevice(device);
+        });
+      } catch (error) {
+        console.error("Error setting up tray menu listeners:", error);
+      }
 
       // Register initial hotkeys and listeners asynchronously
       const currentSettings = get(settings);
@@ -175,9 +187,6 @@
         return true;
       }
 
-      // Declare unlisten placeholder for hands-free hotkey
-      let unlistenToggleHK = () => {};
-
       // Explicit hotkey events from backend
       try {
         console.log("Attempting to register hotkeys:", {
@@ -195,47 +204,52 @@
         console.error("Failed to register hotkeys:", error);
       }
 
-      unlistenToggleHK = await listen("start-recording-from-hotkey", async () => {
-        console.log("start-recording-from-hotkey event received");
-        if (!guard()) {
-          console.log("Guard prevented hotkey action due to debounce");
-          return;
-        }
+      try {
+        unlistenToggleHK = await listen("start-recording-from-hotkey", async () => {
+          console.log("start-recording-from-hotkey event received");
+          if (!guard()) {
+            console.log("Guard prevented hotkey action due to debounce");
+            return;
+          }
 
-        if (!isRecording) {
-          console.log("Starting recording from hotkey");
-          startRecording();
-        } else {
-          console.log("Already recording, ignoring hotkey start request");
-        }
-      });
+          if (!isRecording) {
+            console.log("Starting recording from hotkey");
+            startRecording();
+          } else {
+            console.log("Already recording, ignoring hotkey start request");
+          }
+        });
 
-      // Listen for deterministic hotkey stop events
-      let unlistenStopHK = await listen("stop-recording-from-hotkey", async () => {
-        console.log("stop-recording-from-hotkey event received");
-        if (!guard()) {
-          console.log("Guard prevented hotkey action due to debounce");
-          return;
-        }
+        // Listen for deterministic hotkey stop events
+        unlistenStopHK = await listen("stop-recording-from-hotkey", async () => {
+          console.log("stop-recording-from-hotkey event received");
+          if (!guard()) {
+            console.log("Guard prevented hotkey action due to debounce");
+            return;
+          }
 
-        if (isRecording) {
-          console.log("Stopping recording from hotkey");
-          stopRecording();
-        } else {
-          console.log("Already not recording, ignoring hotkey stop request");
-        }
-      });
+          if (isRecording) {
+            console.log("Stopping recording from hotkey");
+            stopRecording();
+          } else {
+            console.log("Already not recording, ignoring hotkey stop request");
+          }
+        });
 
-      // Keep old toggle event listener for backward compatibility, but log it
-      let unlistenLegacyToggleHK = await listen("toggle-recording-from-hotkey", async () => {
-        console.warn("Legacy toggle-recording-from-hotkey event received - this should not happen with new implementation");
-      });
+        // Keep old toggle event listener for backward compatibility, but log it
+        unlistenLegacyToggleHK = await listen("toggle-recording-from-hotkey", async () => {
+          console.warn("Legacy toggle-recording-from-hotkey event received - this should not happen with new implementation");
+        });
+      } catch (error) {
+        console.error("Failed to setup hotkey listeners:", error);
+      }
 
       // Listen for finalized utterances from Rust backend
-      unlistenTranscriptionUpdate = await listen(
-        "transcribed-text",
-        (event) => {
-          const payload: any = event.payload;
+      try {
+        unlistenTranscriptionUpdate = await listen(
+          "transcribed-text",
+          (event: any) => {
+            const payload: any = event.payload;
           // Payload can be either a plain string (legacy / simple final text)
           // or an object { raw, final } where raw is original aggregated utterance
           // and final is processed/translated text when translation is enabled.
@@ -329,7 +343,15 @@
         sessionEnded = true;
         showTrayNotification("Recording stopped - time limit exceeded");
       });
-    })();
+      } catch (error) {
+        console.error("Failed to setup recording listeners:", error);
+      }
+    };
+
+    // Call setupListeners and handle errors
+    setupListeners().catch((error) => {
+      console.error("Failed to setup event listeners:", error);
+    });
 
     return () => {
       // Clean up event listeners
@@ -385,7 +407,7 @@
         
         // Show recording started notification
         try {
-          invoke("show_recording_started_notification").catch(error => {
+          invoke("show_recording_started_notification").catch((error: any) => {
             console.warn("Failed to show recording started notification:", error);
           });
         } catch (error) {
@@ -485,7 +507,7 @@
     
     // Show recording stopped notification immediately (non-blocking)
     try {
-      invoke("show_recording_stopped_notification").catch(error => {
+      invoke("show_recording_stopped_notification").catch((error: any) => {
         console.warn("Failed to show recording stopped notification:", error);
       });
     } catch (error) {
