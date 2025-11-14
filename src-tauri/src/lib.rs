@@ -25,6 +25,9 @@ mod system_audio;
 use system_audio::SystemAudioControl;
 mod debug_logger;
 use debug_logger::DebugLogger;
+mod storage;
+use storage::SettingsStore;
+mod hotkey_fsm;
 
 // Global state to track registered hotkeys and active recording
 type HotkeyRegistry = Mutex<HashMap<String, String>>;
@@ -1605,12 +1608,33 @@ async fn show_recording_timeout_notification(app: AppHandle, max_time_minutes: u
     Ok(())
 }
 
+#[tauri::command]
+async fn load_persistent_settings(app: AppHandle) -> Result<serde_json::Value, String> {
+    let settings = SettingsStore::load(&app)?;
+    Ok(serde_json::to_value(settings).map_err(|e| e.to_string())?)
+}
+
+#[tauri::command]
+async fn save_persistent_settings(app: AppHandle, settings: serde_json::Value) -> Result<(), String> {
+    let settings: storage::PersistentSettings = serde_json::from_value(settings)
+        .map_err(|e| format!("Failed to deserialize settings: {}", e))?;
+    SettingsStore::save(&app, &settings)?;
+    Ok(())
+}
+
+#[tauri::command]
+async fn update_persistent_setting(app: AppHandle, field: String, value: serde_json::Value) -> Result<(), String> {
+    SettingsStore::update_field(&app, &field, value)?;
+    Ok(())
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
     .plugin(tauri_plugin_opener::init())
     .plugin(tauri_plugin_global_shortcut::Builder::new().build())
     .plugin(tauri_plugin_notification::init())
+    .plugin(tauri_plugin_store::Builder::default().build())
         // Register Stronghold plugin for encrypted at-rest storage (JS guest APIs available)
         .setup(|app| {
             // derive salt path for argon2 KDF used by the plugin
@@ -1717,13 +1741,16 @@ pub fn run() {
             translate_text,
             load_settings_from_frontend,
             save_settings_from_frontend,
-            init_debug_logging
-            , get_audio_manager_last_error
-            , clear_audio_manager_last_error
-            , show_recording_timeout_notification
-            , test_hotkey_parsing
-            , show_recording_started_notification
-            , show_recording_stopped_notification
+            init_debug_logging,
+            get_audio_manager_last_error,
+            clear_audio_manager_last_error,
+            show_recording_timeout_notification,
+            test_hotkey_parsing,
+            show_recording_started_notification,
+            show_recording_stopped_notification,
+            load_persistent_settings,
+            save_persistent_settings,
+            update_persistent_setting
         ])
         .setup(|app| {
             // Initialize debug logging first (disabled by default, will be enabled by frontend)

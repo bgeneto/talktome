@@ -59,6 +59,7 @@ const defaultSettings: Settings = {
 
 function createSettingsStore() {
   let initialSettings: Settings;
+  let loadedFromPersistent = false;
 
   try {
     const storedSettings = localStorage.getItem("talktome-settings");
@@ -106,6 +107,39 @@ function createSettingsStore() {
 
   const store = { subscribe, set, update };
 
+  // Load settings from Tauri persistent store
+  const loadPersistentSettings = async () => {
+    try {
+      const persistedSettings = (await invoke("load_persistent_settings")) as any;
+      if (persistedSettings) {
+        loadedFromPersistent = true;
+        update((settings) => {
+          return {
+            ...settings,
+            spokenLanguage: persistedSettings.spoken_language || settings.spokenLanguage,
+            translationLanguage: persistedSettings.translation_language || settings.translationLanguage,
+            audioDevice: persistedSettings.audio_device || settings.audioDevice,
+            theme: persistedSettings.theme || settings.theme,
+            apiEndpoint: persistedSettings.api_endpoint || settings.apiEndpoint,
+            sttModel: persistedSettings.stt_model || settings.sttModel,
+            translationModel: persistedSettings.translation_model || settings.translationModel,
+            autoMute: persistedSettings.auto_mute !== undefined ? persistedSettings.auto_mute : settings.autoMute,
+            translationEnabled: persistedSettings.translation_enabled !== undefined ? persistedSettings.translation_enabled : settings.translationEnabled,
+            debugLogging: persistedSettings.debug_logging !== undefined ? persistedSettings.debug_logging : settings.debugLogging,
+            textInsertionEnabled: persistedSettings.text_insertion_enabled !== undefined ? persistedSettings.text_insertion_enabled : settings.textInsertionEnabled,
+            maxRecordingTimeMinutes: persistedSettings.max_recording_time_minutes || settings.maxRecordingTimeMinutes,
+            hotkeys: {
+              handsFree: persistedSettings.hands_free_hotkey || settings.hotkeys.handsFree,
+            },
+          };
+        });
+        console.log("Settings loaded from persistent store");
+      }
+    } catch (error) {
+      console.log("No persistent settings found or error loading them:", error);
+    }
+  };
+
   // Load API key from backend if not present in localStorage
   const loadApiKeyFromBackend = async () => {
     try {
@@ -133,6 +167,9 @@ function createSettingsStore() {
 
   // Load API key from backend on initialization
   loadApiKeyFromBackend();
+  
+  // Load settings from Tauri persistent store on initialization
+  loadPersistentSettings();
 
   // Create syncToBackend function that can be called by setters
   const syncToBackend = async () => {
@@ -155,6 +192,25 @@ function createSettingsStore() {
         hands_free_hotkey: currentSettings.hotkeys.handsFree,
         text_insertion_enabled: currentSettings.textInsertionEnabled,
         audio_chunking_enabled: false, // FORCE: Always send false to backend for reliability
+      });
+
+      // Also save to persistent store for cross-restart persistence
+      await invoke("save_persistent_settings", {
+        settings: {
+          spoken_language: currentSettings.spokenLanguage,
+          translation_language: currentSettings.translationLanguage,
+          audio_device: currentSettings.audioDevice,
+          theme: currentSettings.theme,
+          api_endpoint: currentSettings.apiEndpoint,
+          stt_model: currentSettings.sttModel,
+          translation_model: currentSettings.translationModel,
+          auto_mute: currentSettings.autoMute,
+          translation_enabled: currentSettings.translationLanguage !== "none",
+          debug_logging: currentSettings.debugLogging,
+          hands_free_hotkey: currentSettings.hotkeys.handsFree,
+          text_insertion_enabled: currentSettings.textInsertionEnabled,
+          max_recording_time_minutes: currentSettings.maxRecordingTimeMinutes,
+        },
       });
     } catch (error) {
       console.error("Failed to sync settings to backend:", error);
