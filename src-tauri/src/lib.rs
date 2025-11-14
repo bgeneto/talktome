@@ -1689,14 +1689,143 @@ pub fn run() {
     .plugin(tauri_plugin_store::Builder::default().build())
         // Register Stronghold plugin for encrypted at-rest storage (JS guest APIs available)
         .setup(|app| {
-            // derive salt path for argon2 KDF used by the plugin
+            // Initialize Stronghold plugin for encrypted storage
             let salt_path = app
                 .path()
                 .app_local_data_dir()
                 .expect("could not resolve app local data path")
                 .join("salt.txt");
-            // register the plugin using the Builder::with_argon2 helper
             let _ = app.handle().plugin(tauri_plugin_stronghold::Builder::with_argon2(&salt_path).build());
+            
+            // Initialize debug logging first (disabled by default, will be enabled by frontend)
+            if let Err(e) = DebugLogger::init(&app.handle()) {
+                eprintln!("Failed to initialize debug logging: {}", e);
+            }
+            
+            DebugLogger::log_info("TalkToMe application starting up");
+            DebugLogger::log_info("Initialized with default settings for tray menu");
+            
+            // Create a simple system tray menu
+            let tray_menu = {
+                let show_hide = MenuItemBuilder::with_id("show_hide", "Show/Hide TalkToMe").build(app)?;
+                
+                let preferences = MenuItemBuilder::with_id("preferences", "Preferences").build(app)?;
+                let api_settings = MenuItemBuilder::with_id("api_settings", "API Settings").build(app)?;
+                let language_settings = MenuItemBuilder::with_id("language_settings", "Language Settings").build(app)?;
+                let audio_settings = MenuItemBuilder::with_id("audio_settings", "Audio Settings").build(app)?;
+                let about = MenuItemBuilder::with_id("about", "About TalkToMe").build(app)?;
+                let quit = MenuItemBuilder::with_id("quit", "Quit").build(app)?;
+
+                MenuBuilder::new(app)
+                    .items(&[
+                        &show_hide,
+                        &preferences,
+                        &api_settings,
+                        &language_settings, 
+                        &audio_settings,
+                        &about,
+                        &quit,
+                    ])
+                    .build()?
+            };
+
+            // Build the system tray
+            let _tray = TrayIconBuilder::with_id("main-tray")
+                .tooltip("TalkToMe - Voice to Text with Translation")
+                .icon(app.default_window_icon().unwrap().clone())
+                .menu(&tray_menu)
+                .show_menu_on_left_click(false)
+                .on_menu_event(move |app, event| {
+                    match event.id.as_ref() {
+                        "show_hide" => {
+                            if let Err(e) = toggle_window(app.clone()) {
+                                eprintln!("Failed to toggle window: {}", e);
+                            }
+                        }
+                        "preferences" => {
+                            if let Some(window) = app.get_webview_window("main") {
+                                let _ = window.show();
+                                let _ = window.set_focus();
+                                let _ = window.emit("show-preferences", ());
+                            }
+                        }
+                        "api_settings" => {
+                            if let Some(window) = app.get_webview_window("main") {
+                                let _ = window.show();
+                                let _ = window.set_focus();
+                                let _ = window.emit("show-api-settings", ());
+                            }
+                        }
+                        "language_settings" => {
+                            if let Some(window) = app.get_webview_window("main") {
+                                let _ = window.show();
+                                let _ = window.set_focus();
+                                let _ = window.emit("show-language-settings", ());
+                            }
+                        }
+                        "audio_settings" => {
+                            if let Some(window) = app.get_webview_window("main") {
+                                let _ = window.show();
+                                let _ = window.set_focus();
+                                let _ = window.emit("show-audio-settings", ());
+                            }
+                        }
+                        "about" => {
+                            if let Some(window) = app.get_webview_window("main") {
+                                let _ = window.show();
+                                let _ = window.set_focus();
+                                let _ = window.emit("show-about", ());
+                            }
+                        }
+                        "quit" => {
+                            app.exit(0);
+                        }
+                        _ => {}
+                    }
+                })
+                .on_tray_icon_event(|tray, event| {
+                    match event {
+                        TrayIconEvent::Click {
+                            button: MouseButton::Left,
+                            button_state: MouseButtonState::Up,
+                            ..
+                        } => {
+                            let app = tray.app_handle();
+                            if let Err(e) = toggle_window(app.clone()) {
+                                eprintln!("Failed to toggle window from tray click: {}", e);
+                            }
+                        }
+                        TrayIconEvent::DoubleClick {
+                            button: MouseButton::Left,
+                            ..
+                        } => {
+                            let app = tray.app_handle();
+                            if let Some(window) = app.get_webview_window("main") {
+                                let _ = window.show();
+                                let _ = window.set_focus();
+                            }
+                        }
+                        _ => {}
+                    }
+                })
+                .build(app)?;
+
+            // Handle window close request (minimize to tray instead of closing)
+            if let Some(window) = app.get_webview_window("main") {
+                let app_handle = app.app_handle().clone();
+                window.on_window_event(move |event| {
+                    match event {
+                        tauri::WindowEvent::CloseRequested { api, .. } => {
+                            api.prevent_close();
+                            if let Some(window) = app_handle.get_webview_window("main") {
+                                let _ = window.hide();
+                            }
+                        }
+                        _ => {}
+                    }
+                });
+            }
+
             Ok(())
         })
         .manage(Mutex::<HashMap<String, String>>::new(HashMap::new()))
@@ -1808,141 +1937,6 @@ pub fn run() {
             reset_hotkey_fsm,
             set_hotkey_fsm_recording
         ])
-        .setup(|app| {
-            // Initialize debug logging first (disabled by default, will be enabled by frontend)
-            if let Err(e) = DebugLogger::init(&app.handle()) {
-                eprintln!("Failed to initialize debug logging: {}", e);
-            }
-            
-            DebugLogger::log_info("TalkToMe application starting up");
-            DebugLogger::log_info("Using localStorage-based settings (no settings.json file)");
-            DebugLogger::log_info("Initialized with default settings for tray menu");
-            
-            // Create a simple system tray menu without problematic dynamic submenus
-            let tray_menu = {
-                let show_hide = MenuItemBuilder::with_id("show_hide", "Show/Hide TalkToMe").build(app)?;
-                
-                let preferences = MenuItemBuilder::with_id("preferences", "Preferences").build(app)?;
-                let api_settings = MenuItemBuilder::with_id("api_settings", "API Settings").build(app)?;
-                let language_settings = MenuItemBuilder::with_id("language_settings", "Language Settings").build(app)?;
-                let audio_settings = MenuItemBuilder::with_id("audio_settings", "Audio Settings").build(app)?;
-                let about = MenuItemBuilder::with_id("about", "About TalkToMe").build(app)?;
-                let quit = MenuItemBuilder::with_id("quit", "Quit").build(app)?;
-
-                MenuBuilder::new(app)
-                    .items(&[
-                        &show_hide,
-                        &preferences,
-                        &api_settings,
-                        &language_settings, 
-                        &audio_settings,
-                        &about,
-                        &quit,
-                    ])
-                    .build()?
-            };
-
-            // Build the system tray
-            let _tray = TrayIconBuilder::with_id("main-tray")
-                .tooltip("TalkToMe - Voice to Text with Translation")
-                .icon(app.default_window_icon().unwrap().clone())
-                .menu(&tray_menu)
-                .show_menu_on_left_click(false)
-                .on_menu_event(move |app, event| {
-                    match event.id.as_ref() {
-                        "show_hide" => {
-                            if let Err(e) = toggle_window(app.clone()) {
-                                eprintln!("Failed to toggle window: {}", e);
-                            }
-                        }
-                        "preferences" => {
-                            if let Some(window) = app.get_webview_window("main") {
-                                let _ = window.show();
-                                let _ = window.set_focus();
-                                let _ = window.emit("show-preferences", ());
-                            }
-                        }
-                        "api_settings" => {
-                            if let Some(window) = app.get_webview_window("main") {
-                                let _ = window.show();
-                                let _ = window.set_focus();
-                                let _ = window.emit("show-api-settings", ());
-                            }
-                        }
-                        "language_settings" => {
-                            if let Some(window) = app.get_webview_window("main") {
-                                let _ = window.show();
-                                let _ = window.set_focus();
-                                let _ = window.emit("show-language-settings", ());
-                            }
-                        }
-                        "audio_settings" => {
-                            if let Some(window) = app.get_webview_window("main") {
-                                let _ = window.show();
-                                let _ = window.set_focus();
-                                let _ = window.emit("show-audio-settings", ());
-                            }
-                        }
-                        "about" => {
-                            if let Some(window) = app.get_webview_window("main") {
-                                let _ = window.show();
-                                let _ = window.set_focus();
-                                let _ = window.emit("show-about", ());
-                            }
-                        }
-                        "quit" => {
-                            app.exit(0);
-                        }
-                        _ => {}
-                    }
-                })
-                .on_tray_icon_event(|tray, event| {
-                    match event {
-                        TrayIconEvent::Click {
-                            button: MouseButton::Left,
-                            button_state: MouseButtonState::Up,
-                            ..
-                        } => {
-                            let app = tray.app_handle();
-                            if let Err(e) = toggle_window(app.clone()) {
-                                eprintln!("Failed to toggle window from tray click: {}", e);
-                            }
-                        }
-                        TrayIconEvent::DoubleClick {
-                            button: MouseButton::Left,
-                            ..
-                        } => {
-                            let app = tray.app_handle();
-                            if let Some(window) = app.get_webview_window("main") {
-                                let _ = window.show();
-                                let _ = window.set_focus();
-                            }
-                        }
-                        _ => {}
-                    }
-                })
-                .build(app)?;
-
-            // Handle window close request (minimize to tray instead of closing)
-            if let Some(window) = app.get_webview_window("main") {
-                let app_handle = app.app_handle().clone();
-                window.on_window_event(move |event| {
-                    match event {
-                        tauri::WindowEvent::CloseRequested { api, .. } => {
-                            // Prevent the default close behavior
-                            api.prevent_close();
-                            // Hide the window instead
-                            if let Some(window) = app_handle.get_webview_window("main") {
-                                let _ = window.hide();
-                            }
-                        }
-                        _ => {}
-                    }
-                });
-            }
-
-            Ok(())
-        })
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }
