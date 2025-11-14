@@ -167,28 +167,83 @@
   }
 
   async function persistSettings(updated: Partial<typeof currentSettings>) {
-    console.log("persistSettings called with:", updated);
-    
+    console.log("🔄 API persistSettings called with:", updated);
+    const storeState = get(settings);
+    console.log("📊 Current store state:", storeState);
+
     try {
-      // Call individual setters which handle localStorage and backend sync
-      if (updated.hasOwnProperty("apiEndpoint")) {
-        await settings.setApiEndpoint(updated.apiEndpoint!);
+      // Instead of calling individual setters which each do syncToBackend,
+      // do a single syncToBackend call with the updated store data
+
+      // Update the store directly
+      settings.update((current) => ({
+        ...current,
+        ...updated,
+      }));
+
+      // Update localStorage
+      const settingsForLocalStorage = { ...storeState, ...updated, apiKey: "" };
+      localStorage.setItem("talktome-settings", JSON.stringify(settingsForLocalStorage));
+
+      // Handle API key separately if it was updated
+      if (updated.apiKey) {
+        const { invoke } = await import("@tauri-apps/api/core");
+        await invoke("store_api_key", {
+          api_key: updated.apiKey,
+          apiKey: updated.apiKey
+        });
+        console.log("API key stored securely");
       }
 
-      if (updated.hasOwnProperty("apiKey")) {
-        await settings.setApiKey(updated.apiKey!);
-      }
+      // Single sync to backend with complete data
+      await syncSettingsToBackend();
 
-      if (updated.hasOwnProperty("sttModel")) {
-        await settings.setSttModel(updated.sttModel!);
-      }
-
-      if (updated.hasOwnProperty("translationModel")) {
-        console.log("Setting translation model to:", updated.translationModel);
-        await settings.setTranslationModel(updated.translationModel!);
-      }
+      console.log("😊 persistSettings completed successfully");
     } catch (error) {
-      console.error("Failed to persist settings:", error);
+      console.error("❌ Failed to persist settings:", error, typeof error);
+      throw error;
+    }
+  }
+
+  async function syncSettingsToBackend() {
+    console.log("🔄 syncSettingsToBackend called");
+
+    const currentSettings = get(settings);
+    console.log("📊 Settings to sync:", {
+      spokenLanguage: currentSettings.spokenLanguage,
+      translationLanguage: currentSettings.translationLanguage,
+      apiEndpoint: currentSettings.apiEndpoint,
+      sttModel: currentSettings.sttModel,
+      translationModel: currentSettings.translationModel,
+      textInsertionEnabled: currentSettings.textInsertionEnabled,
+    });
+
+    const { invoke } = await import("@tauri-apps/api/core");
+
+    // Build complete settings object for persistent store
+    const settingsToSave = {
+      spoken_language: currentSettings.spokenLanguage,
+      translation_language: currentSettings.translationLanguage,
+      audio_device: currentSettings.audioDevice,
+      theme: currentSettings.theme,
+      api_endpoint: currentSettings.apiEndpoint,
+      stt_model: currentSettings.sttModel,
+      translation_model: currentSettings.translationModel,
+      auto_mute: currentSettings.autoMute,
+      translation_enabled: currentSettings.translationLanguage !== "none",
+      debug_logging: currentSettings.debugLogging,
+      hands_free_hotkey: currentSettings.hotkeys.handsFree,
+      text_insertion_enabled: currentSettings.textInsertionEnabled,
+      max_recording_time_minutes: currentSettings.maxRecordingTimeMinutes,
+    };
+
+    console.log("📤 Sending complete settings to backend:", settingsToSave);
+
+    try {
+      await invoke("save_persistent_settings", { settings: settingsToSave });
+      console.log("✅ Backend sync completed successfully");
+    } catch (error) {
+      console.error("❌ Backend sync failed:", error);
       throw error;
     }
   }
@@ -236,15 +291,40 @@
           "Cannot save settings: API connectivity test failed. Please check your API endpoint and key.";
       }
     } catch (error) {
-      console.error("Error during save:", error);
+      console.error("Error during save:", error, typeof error);
+
+      // Extract meaningful error message from different error types
+      let userFriendlyMessage = "Failed to save API settings. Please try again.";
+
       if (error instanceof Error) {
-  saveError = error.message;
-  // surface persistent error in a toast for better discoverability
-  showToast(saveError, 'error', 8000);
-      } else {
-  saveError = "Failed to save API settings. Please try again.";
-  showToast(saveError, 'error', 8000);
+        userFriendlyMessage = error.message;
+      } else if (typeof error === "string") {
+        // Direct string error from Tauri
+        userFriendlyMessage = error;
+      } else if (typeof error === "object" && error !== null) {
+        // Try to extract message from object (type-safe way)
+        const errorObj = error as any;
+        if (typeof errorObj.message === "string") {
+          userFriendlyMessage = errorObj.message;
+        } else if (typeof errorObj.toString === "function") {
+          const stringified = errorObj.toString();
+          if (stringified !== "[object Object]") {
+            userFriendlyMessage = stringified;
+          }
+        }
       }
+
+      // Provide more specific messages for common errors
+      if (userFriendlyMessage.includes("API key")) {
+        userFriendlyMessage = "Failed to save API key securely. Please try again.";
+      } else if (userFriendlyMessage.includes("deserialize") || userFriendlyMessage.includes("missing field")) {
+        userFriendlyMessage = "Settings data is corrupted. Please restart the app and try again.";
+      } else if (userFriendlyMessage.includes("permission") || userFriendlyMessage.includes("access")) {
+        userFriendlyMessage = "Unable to save settings due to file access permissions. Please check your app permissions.";
+      }
+
+      saveError = userFriendlyMessage;
+      showToast(saveError, 'error', 8000);
     } finally {
       isSaving = false;
     }

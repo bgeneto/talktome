@@ -123,7 +123,7 @@ function createSettingsStore() {
             translationModel: persistedSettings.translation_model || settings.translationModel,
             autoMute: persistedSettings.auto_mute !== undefined ? persistedSettings.auto_mute : settings.autoMute,
             debugLogging: persistedSettings.debug_logging !== undefined ? persistedSettings.debug_logging : settings.debugLogging,
-            textInsertionEnabled: persistedSettings.text_insertion_enabled !== undefined ? persistedSettings.text_insertion_enabled : settings.textInsertionEnabled,
+            textInsertionEnabled: persistedSettings.text_insertion_enabled !== undefined ? persistedSettings.text_insertion_enabled : defaultSettings.textInsertionEnabled,
             maxRecordingTimeMinutes: persistedSettings.max_recording_time_minutes || settings.maxRecordingTimeMinutes,
             hotkeys: {
               handsFree: persistedSettings.hands_free_hotkey || settings.hotkeys.handsFree,
@@ -133,7 +133,20 @@ function createSettingsStore() {
         console.log("Settings loaded from persistent store");
       }
     } catch (error) {
-      console.log("No persistent settings found or error loading them:", error);
+      console.error("Failed to load persistent settings - falling back to defaults:", error);
+      // Log this error visibly to help with debugging
+      const errorMessage = error instanceof Error ? error.message : String(error);
+      console.warn(`Settings load error: ${errorMessage}. API endpoint and other settings may revert to defaults on restart.`);
+
+      // Emit event to notify frontend about settings load failure
+      try {
+        await invoke("frontend_log", {
+          tag: "settings_load_error",
+          payload: { error: errorMessage }
+        });
+      } catch (logError) {
+        console.error("Failed to log settings load error to backend:", logError);
+      }
     }
   };
 
@@ -176,10 +189,20 @@ function createSettingsStore() {
 
   // Create syncToBackend function that can be called by setters
   const syncToBackend = async () => {
+    console.log("🔄 syncToBackend called - syncing settings...");
+
     try {
       const currentSettings = get(store);
+      console.log("📊 Current settings to sync:", {
+        spokenLanguage: currentSettings.spokenLanguage,
+        translationLanguage: currentSettings.translationLanguage,
+        apiEndpoint: currentSettings.apiEndpoint,
+        sttModel: currentSettings.sttModel,
+        translationModel: currentSettings.translationModel,
+      });
 
       // SECURITY: Don't send API key in this sync - it's stored separately via store_api_key
+      console.log("📡 Calling save_settings_from_frontend...");
       await invoke("save_settings_from_frontend", {
         spoken_language: currentSettings.spokenLanguage,
         translation_language: currentSettings.translationLanguage,
@@ -195,30 +218,43 @@ function createSettingsStore() {
         hands_free_hotkey: currentSettings.hotkeys.handsFree,
         text_insertion_enabled: currentSettings.textInsertionEnabled,
         audio_chunking_enabled: false, // FORCE: Always send false to backend for reliability
+        max_recording_time_minutes: currentSettings.maxRecordingTimeMinutes,
       });
+      console.log("✅ save_settings_from_frontend succeeded");
 
       // Also save to persistent store for cross-restart persistence
+      console.log("💾 Calling save_persistent_settings...");
+      // Build settings object with all fields to ensure complete sync
+      const settingsToSave = {
+        spoken_language: currentSettings.spokenLanguage,
+        translation_language: currentSettings.translationLanguage,
+        audio_device: currentSettings.audioDevice,
+        theme: currentSettings.theme,
+        api_endpoint: currentSettings.apiEndpoint,
+        stt_model: currentSettings.sttModel,
+        translation_model: currentSettings.translationModel,
+        auto_mute: currentSettings.autoMute,
+        translation_enabled: currentSettings.translationLanguage !== "none",
+        debug_logging: currentSettings.debugLogging,
+        hands_free_hotkey: currentSettings.hotkeys.handsFree,
+        text_insertion_enabled: currentSettings.textInsertionEnabled,
+        max_recording_time_minutes: currentSettings.maxRecordingTimeMinutes,
+      };
+
+      console.log("🏗️ BUILT COMPLETE SETTINGS OBJECT:");
+      console.log("📤 spoken_language:", settingsToSave.spoken_language);
+      console.log("📤 translation_language:", settingsToSave.translation_language);
+      console.log("📤 text_insertion_enabled:", settingsToSave.text_insertion_enabled);
+      console.log("📤 max_recording_time_minutes:", settingsToSave.max_recording_time_minutes);
+
       await invoke("save_persistent_settings", {
-        settings: {
-          spoken_language: currentSettings.spokenLanguage,
-          translation_language: currentSettings.translationLanguage,
-          audio_device: currentSettings.audioDevice,
-          theme: currentSettings.theme,
-          api_endpoint: currentSettings.apiEndpoint,
-          stt_model: currentSettings.sttModel,
-          translation_model: currentSettings.translationModel,
-          auto_mute: currentSettings.autoMute,
-          translation_enabled: currentSettings.translationLanguage !== "none",
-          debug_logging: currentSettings.debugLogging,
-          hands_free_hotkey: currentSettings.hotkeys.handsFree,
-          text_insertion_enabled: currentSettings.textInsertionEnabled,
-          max_recording_time_minutes: currentSettings.maxRecordingTimeMinutes,
-        },
+        settings: settingsToSave,
       });
-      
-      console.log("Settings synced to backend successfully");
+      console.log("✅ save_persistent_settings succeeded");
+
+      console.log("😊 Settings synced to backend successfully");
     } catch (error) {
-      console.error("Failed to sync settings to backend:", error);
+      console.error("❌ Failed to sync settings to backend:", error, typeof error);
       // Re-throw the error so callers know it failed
       throw error;
     }
@@ -301,7 +337,7 @@ function createSettingsStore() {
         );
         return newSettings;
       });
-      // Sync to backend
+      // Sync to backend immediately
       await syncToBackend();
     },
     setDebugLogging: async (enabled: boolean) => {
@@ -315,7 +351,7 @@ function createSettingsStore() {
         );
         return newSettings;
       });
-      // Sync to backend
+      // Sync to backend immediately
       await syncToBackend();
     },
     setTextInsertionEnabled: async (enabled: boolean) => {
@@ -329,7 +365,7 @@ function createSettingsStore() {
         );
         return newSettings;
       });
-      // Sync to backend
+      // Sync to backend immediately
       await syncToBackend();
     },
     updateHotkeys: async (hotkeys: { handsFree: string }) => {
@@ -399,53 +435,51 @@ function createSettingsStore() {
       await syncToBackend();
     },
     setApiKey: async (key: string) => {
-      return new Promise((resolve, reject) => {
-        update((settings) => {
-          // SECURITY: Store API key securely in backend only, never in localStorage
-          const newSettings = { ...settings, apiKey: key };
+      update((settings) => {
+        // SECURITY: Store API key securely in backend only, never in localStorage
+        const newSettings = { ...settings, apiKey: key };
 
-          // Save all OTHER settings to localStorage (excluding API key)
-          const settingsForLocalStorage = { ...newSettings, apiKey: "" }; // Set to empty instead of delete
-          localStorage.setItem(
-            "talktome-settings",
-            JSON.stringify(settingsForLocalStorage)
-          );
+        // Save all OTHER settings to localStorage (excluding API key)
+        const settingsForLocalStorage = { ...newSettings, apiKey: "" }; // Set to empty instead of delete
+        localStorage.setItem(
+          "talktome-settings",
+          JSON.stringify(settingsForLocalStorage)
+        );
 
-          // Store API key securely in backend.
-          // Send both snake_case and camelCase forms to be robust against platform naming inconsistencies.
-          invoke("store_api_key", { api_key: key, apiKey: key })
-            .then(() => {
-              console.log("API key stored successfully in backend");
-              // Sync other settings to backend for consistency
-              setTimeout(() => {
-                syncToBackend();
-              }, 0);
-              resolve(newSettings);
-            })
-            .catch((err) => {
-              console.error("Failed to store API key securely:", err);
-              // Extract a readable message when possible
-              let msg = "Failed to store API key in backend";
-              try {
-                if (typeof err === "string") msg = err;
-                else if (err && typeof err === "object") {
-                  // Tauri sometimes wraps errors; try common fields
-                  msg = (err as any).toString() || msg;
-                  if ((err as any).message) msg = (err as any).message;
-                }
-              } catch (e) {
-                // ignore extraction errors
-              }
-              // Still update the store in memory so the user can use the key temporarily
-              setTimeout(() => {
-                syncToBackend();
-              }, 0);
-              reject(new Error(msg));
-            });
-
-          return newSettings;
-        });
+        return newSettings;
       });
+
+      try {
+        // Store API key securely in backend.
+        // Send both snake_case and camelCase forms to be robust against platform naming inconsistencies.
+        await invoke("store_api_key", { api_key: key, apiKey: key });
+        console.log("API key stored successfully in backend");
+
+        // Sync other settings to backend for consistency
+        await syncToBackend();
+      } catch (err) {
+        console.error("Failed to store API key securely:", err);
+        // Extract a readable message when possible
+        let msg = "Failed to store API key in backend";
+        try {
+          if (typeof err === "string") msg = err;
+          else if (err && typeof err === "object") {
+            // Tauri sometimes wraps errors; try common fields
+            msg = (err as any).toString() || msg;
+            if ((err as any).message) msg = (err as any).message;
+          }
+        } catch (e) {
+          // ignore extraction errors
+        }
+        // Still sync settings for consistency, but don't fail the whole operation
+        // since the API key is critical for the user experience
+        try {
+          await syncToBackend();
+        } catch (syncError) {
+          console.error("Failed to sync settings after API key error:", syncError);
+        }
+        throw new Error(msg);
+      }
     },
     setSttModel: async (model: string) => {
       update((settings) => {

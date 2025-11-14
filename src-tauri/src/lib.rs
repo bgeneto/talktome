@@ -1582,35 +1582,46 @@ async fn load_settings_from_frontend() -> Result<String, String> {
 #[tauri::command]
 async fn save_settings_from_frontend(
     app: AppHandle,
-    spoken_language: String,
-    translation_language: String,
-    audio_device: String,
-    theme: String,
-    api_endpoint: String,
-    api_key: String,
-    stt_model: String,
-    translation_model: String,
-    auto_mute: bool,
-    translation_enabled: bool,
-    debug_logging: bool,
-    hands_free_hotkey: String,
-    text_insertion_enabled: bool
+    spoken_language: Option<String>,
+    translation_language: Option<String>,
+    audio_device: Option<String>,
+    theme: Option<String>,
+    api_endpoint: Option<String>,
+    api_key: Option<String>,
+    stt_model: Option<String>,
+    translation_model: Option<String>,
+    auto_mute: Option<bool>,
+    translation_enabled: Option<bool>,
+    debug_logging: Option<bool>,
+    hands_free_hotkey: Option<String>,
+    text_insertion_enabled: Option<bool>,
+    audio_chunking_enabled: Option<bool>,
+    max_recording_time_minutes: Option<u32>
 ) -> Result<(), String> {
     // Log the settings being saved (without logging the API key for security)
-    DebugLogger::log_info(&format!("SETTINGS_SAVE: spoken_language={}, translation_language={}, audio_device={}, theme={}, api_endpoint={}, stt_model={}, translation_model={}, api_key_provided={}, auto_mute={}, translation_enabled={}, debug_logging={}, hands_free={}, text_insertion_enabled={}", 
-        spoken_language, translation_language, audio_device, theme, api_endpoint, stt_model, translation_model, !api_key.is_empty(), auto_mute, translation_enabled, debug_logging, hands_free_hotkey, text_insertion_enabled));
+    DebugLogger::log_info(&format!("SETTINGS_SAVE_FRONTEND: spoken_language={:?}, translation_language={:?}, audio_device={:?}, theme={:?}, api_endpoint={:?}, stt_model={:?}, translation_model={:?}, api_key_provided={}, auto_mute={:?}, translation_enabled={:?}, debug_logging={:?}, hands_free={:?}, text_insertion_enabled={:?}, audio_chunking_enabled={:?}, max_recording_time_minutes={:?}",
+        spoken_language, translation_language, audio_device, theme, api_endpoint, stt_model, translation_model, api_key.as_ref().map_or(false, |k| !k.is_empty()), auto_mute, translation_enabled, debug_logging, hands_free_hotkey, text_insertion_enabled, audio_chunking_enabled, max_recording_time_minutes));
+
+    // Validate that we have at least some parameters
+    if spoken_language.is_none() && translation_language.is_none() && theme.is_none() && auto_mute.is_none() {
+        return Err("No valid settings provided to save".to_string());
+    }
 
     // Store API key securely if provided and not empty
     // (Note: we now send empty string for security, so API key is stored separately via store_api_key command)
-    if !api_key.is_empty() {
-        let settings = AppSettings::default();
-        settings.store_api_key(&app, api_key)?;
-        DebugLogger::log_info("API key stored securely in backend");
+    if let Some(api_key_val) = api_key {
+        if !api_key_val.is_empty() {
+            let settings = AppSettings::default();
+            settings.store_api_key(&app, api_key_val)?;
+            DebugLogger::log_info("API key stored securely in backend");
+        }
     }
 
-    // Re-initialize debug logging with the new state
-    DebugLogger::init_with_state(&app, debug_logging)?;
-    
+    // Re-initialize debug logging with the new state if provided
+    if let Some(debug_enabled) = debug_logging {
+        DebugLogger::init_with_state(&app, debug_enabled)?;
+    }
+
     Ok(())
 }
 
@@ -1640,10 +1651,28 @@ async fn load_persistent_settings(app: AppHandle) -> Result<serde_json::Value, S
 
 #[tauri::command]
 async fn save_persistent_settings(app: AppHandle, settings: serde_json::Value) -> Result<(), String> {
-    let settings: storage::PersistentSettings = serde_json::from_value(settings)
-        .map_err(|e| format!("Failed to deserialize settings: {}", e))?;
-    SettingsStore::save(&app, &settings)?;
-    Ok(())
+    DebugLogger::log_info(&format!("SETTINGS_SAVE_PERSISTENT: Incoming settings JSON: {}", settings));
+    match serde_json::from_value::<storage::PersistentSettings>(settings.clone()) {
+        Ok(parsed_settings) => {
+            DebugLogger::log_info(&format!("SETTINGS_SAVE_PERSISTENT: Successfully parsed settings object"));
+            match SettingsStore::save(&app, &parsed_settings) {
+                Ok(_) => {
+                    DebugLogger::log_info("SETTINGS_SAVE_PERSISTENT: Successfully saved to store");
+                    Ok(())
+                }
+                Err(e) => {
+                    DebugLogger::log_pipeline_error("settings_store", &format!("Failed to save settings: {}", e));
+                    Err(format!("Failed to save settings to store: {}", e))
+                }
+            }
+        }
+        Err(deserialize_err) => {
+            let error_msg = format!("SETTINGS_SAVE_PERSISTENT: Failed to deserialize settings - missing fields error: {}", deserialize_err);
+            DebugLogger::log_pipeline_error("settings_deserialize", &error_msg);
+            DebugLogger::log_info(&format!("SETTINGS_SAVE_PERSISTENT: Incoming JSON was: {}", settings));
+            Err(error_msg)
+        }
+    }
 }
 
 #[tauri::command]

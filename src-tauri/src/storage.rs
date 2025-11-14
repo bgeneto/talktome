@@ -52,10 +52,22 @@ impl SettingsStore {
 
         match store.get(Self::SETTINGS_KEY) {
             Some(value) => {
-                let settings = serde_json::from_value::<PersistentSettings>(value.clone())
-                    .map_err(|e| format!("Failed to deserialize settings: {}", e))?;
-                crate::debug_logger::DebugLogger::log_info(&format!("Loaded persistent settings from store: spoken_language={}, translation_language={}", settings.spoken_language, settings.translation_language));
-                Ok(settings)
+                match serde_json::from_value::<PersistentSettings>(value.clone()) {
+                    Ok(settings) => {
+                        crate::debug_logger::DebugLogger::log_info(&format!("Loaded persistent settings from store: spoken_language={}, translation_language={}, api_endpoint={}, stt_model={}",
+                            settings.spoken_language, settings.translation_language, settings.api_endpoint, settings.stt_model));
+                        Ok(settings)
+                    }
+                    Err(deserialize_err) => {
+                        let error_msg = format!("Failed to deserialize settings from store: {}. Returning defaults.", deserialize_err);
+                        crate::debug_logger::DebugLogger::log_pipeline_error("settings_store", &error_msg);
+                        // Try to re-save defaults to fix corrupted store
+                        if let Err(save_err) = Self::save(app, &PersistentSettings::default()) {
+                            crate::debug_logger::DebugLogger::log_info(&format!("Failed to re-save defaults after deserialize error: {}", save_err));
+                        }
+                        Ok(PersistentSettings::default())
+                    }
+                }
             }
             None => {
                 crate::debug_logger::DebugLogger::log_info("No persistent settings found in store, using defaults");
