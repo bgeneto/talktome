@@ -2,7 +2,7 @@
   import { onMount } from "svelte";
   import { invoke } from "@tauri-apps/api/core";
   import { listen } from "@tauri-apps/api/event";
-  import { settings } from "../lib/stores/settingsStore";
+  import { settings } from "$lib/stores/settingsStore";
   import { get } from "svelte/store";
 
   let isRecording = false;

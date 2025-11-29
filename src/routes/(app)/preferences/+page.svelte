@@ -2,7 +2,7 @@
   import { onMount } from "svelte";
   import { get } from "svelte/store";
   import { invoke } from "@tauri-apps/api/core";
-  import { settings } from "../../lib/stores/settingsStore";
+  import { settings } from "$lib/stores/settingsStore";
 
   let currentSettings = {
     theme: "auto",

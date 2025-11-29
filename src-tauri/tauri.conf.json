@@ -26,6 +26,21 @@
         "closable": true,
         "minimizable": true,
         "maximizable": true
+      },
+      {
+        "label": "confirmation",
+        "url": "/confirmation",
+        "title": "Start Recording?",
+        "width": 400,
+        "height": 300,
+        "visible": false,
+        "resizable": false,
+        "decorations": false,
+        "alwaysOnTop": true,
+        "skipTaskbar": true,
+        "transparent": true,
+        "center": true,
+        "focus": true
       }
     ],
     "security": {

@@ -1,7 +1,7 @@
 <script lang="ts">
   import { onMount } from "svelte";
   import { get } from "svelte/store";
-  import { settings } from "../../lib/stores/settingsStore";
+  import { settings } from "$lib/stores/settingsStore";
 
   interface Language {
     code: string;

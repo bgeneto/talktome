@@ -1,6 +1,6 @@
 <script lang="ts">
   import { onMount, onDestroy } from "svelte";
-  import { settings } from "../../lib/stores/settingsStore";
+  import { settings } from "$lib/stores/settingsStore";
 
   interface AudioDevice {
     id: string;

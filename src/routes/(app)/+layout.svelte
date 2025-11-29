@@ -4,7 +4,7 @@
   import { listen } from "@tauri-apps/api/event";
   import { goto } from "$app/navigation";
   import { page } from "$app/stores";
-  import { settings, ensureSettingsLoaded } from "../lib/stores/settingsStore";
+  import { settings, ensureSettingsLoaded } from "$lib/stores/settingsStore";
 
   let isDarkMode = false;
   let sidebarCollapsed = false;

@@ -318,32 +318,41 @@ async fn register_hotkeys(
                 match (normalized, ev.state) {
                     // Hands-free: Only process key press (ignore release)
                     ("hands_free", ShortcutState::Pressed) => {
-                        // Use FSM to toggle state with debouncing
-                        if let Some(fsm) = app_handle.try_state::<HotkeySMState>() {
-                            match fsm.try_toggle() {
-                                Ok(Some(new_state)) => {
-                                    DebugLogger::log_info(&format!(
-                                        "HOTKEY_FSM_TOGGLE: action=hands_free, new_state={:?}, ts_ms={}",
-                                        new_state, ts_ms
-                                    ));
-                                    let _ = app_for_emit.emit("toggle-recording-from-hotkey", ());
+                        // Check if we are currently recording
+                        let is_recording = if let Some(fsm) = app_handle.try_state::<HotkeySMState>() {
+                            fsm.get_state().unwrap_or(hotkey_fsm::RecordingState::Idle) == hotkey_fsm::RecordingState::Recording
+                        } else {
+                            false
+                        };
+
+                        if is_recording {
+                            // Already recording: Stop immediately (standard behavior)
+                            if let Some(fsm) = app_handle.try_state::<HotkeySMState>() {
+                                match fsm.try_toggle() {
+                                    Ok(Some(new_state)) => {
+                                        DebugLogger::log_info(&format!(
+                                            "HOTKEY_FSM_TOGGLE: action=hands_free, new_state={:?}, ts_ms={}",
+                                            new_state, ts_ms
+                                        ));
+                                        let _ = app_for_emit.emit("toggle-recording-from-hotkey", ());
+                                    }
+                                    Ok(None) => {
+                                        DebugLogger::log_info("HOTKEY_FSM_DEBOUNCED: action=hands_free (stop)");
+                                    }
+                                    Err(e) => {
+                                        DebugLogger::log_pipeline_error("hotkey_fsm", &format!("FSM error: {}", e));
+                                    }
                                 }
-                                Ok(None) => {
-                                    DebugLogger::log_info(&format!(
-                                        "HOTKEY_FSM_DEBOUNCED: action=hands_free, ts_ms={}",
-                                        ts_ms
-                                    ));
-                                }
-                                Err(e) => {
-                                    DebugLogger::log_pipeline_error(
-                                        "hotkey_fsm",
-                                        &format!("FSM error: {}", e),
-                                    );
-                                }
+                            } else {
+                                let _ = app_for_emit.emit("toggle-recording-from-hotkey", ());
                             }
                         } else {
-                            DebugLogger::log_info("FSM not available, fallback to event emit");
-                            let _ = app_for_emit.emit("toggle-recording-from-hotkey", ());
+                            // Not recording: Show confirmation window instead of starting immediately
+                            DebugLogger::log_info("HOTKEY_TRIGGER: Showing confirmation window");
+                            if let Some(window) = app_handle.get_webview_window("confirmation") {
+                                let _ = window.show();
+                                let _ = window.set_focus();
+                            }
                         }
                     }
                     _ => {
@@ -417,6 +426,55 @@ async fn show_recording_stopped_notification(
         .show()
         .map_err(|e| e.to_string())?;
 
+    Ok(())
+}
+
+// Command to confirm recording from dialog
+#[tauri::command]
+async fn confirm_recording(
+    app: AppHandle,
+    fsm: State<'_, HotkeySMState>,
+) -> Result<(), String> {
+    DebugLogger::log_info("CONFIRM_RECORDING: User confirmed recording start");
+    
+    // Hide confirmation window
+    if let Some(window) = app.get_webview_window("confirmation") {
+        let _ = window.hide();
+    }
+
+    // Toggle FSM to Recording
+    match fsm.try_toggle() {
+        Ok(Some(new_state)) => {
+            DebugLogger::log_info(&format!("CONFIRM_RECORDING: FSM toggled to {:?}", new_state));
+            // Emit event to start recording
+            let _ = app.emit("toggle-recording-from-hotkey", ());
+        }
+        Ok(None) => {
+            DebugLogger::log_info("CONFIRM_RECORDING: FSM debounced (unexpected)");
+            // Force emit anyway since user explicitly confirmed
+            let _ = app.emit("toggle-recording-from-hotkey", ());
+        }
+        Err(e) => {
+            DebugLogger::log_pipeline_error("confirm_recording", &format!("FSM error: {}", e));
+            return Err(e);
+        }
+    }
+
+    Ok(())
+}
+
+// Command to cancel recording from dialog
+#[tauri::command]
+async fn cancel_recording(
+    app: AppHandle,
+) -> Result<(), String> {
+    DebugLogger::log_info("CANCEL_RECORDING: User cancelled recording start");
+    
+    // Hide confirmation window
+    if let Some(window) = app.get_webview_window("confirmation") {
+        let _ = window.hide();
+    }
+    
     Ok(())
 }
 
@@ -1033,69 +1091,86 @@ async fn start_recording(
                                 }));
                                 DebugLogger::log_info("EMIT: Sent raw transcription immediately to frontend");
 
-                                // Emit processing progress to show translation is happening
-                                let _ = app_single.emit("processing-status", serde_json::json!({"status": "translating"}));
-
-                                // Now do translation/correction in background and emit update when done
-                                let final_text = if let Some(ref translation_service) = translation_service_single {
-                                    match translation_service.process_text(
-                                        &transcription,
-                                        &settings_single.spoken_language,
-                                        &settings_single.translation_language,
-                                        settings_single.translation_enabled
-                                    ).await {
-                                        Ok(processed_text) => {
-                                            DebugLogger::log_translation_response(true, Some(&processed_text), None, None);
-
-                                            // EMIT FINAL PROCESSED TEXT
-                                            let _ = app_single.emit("transcribed-text", serde_json::json!({
-                                                "raw": transcription,
-                                                "final": processed_text
-                                            }));
-                                            DebugLogger::log_info("EMIT: Sent final processed text to frontend");
-
-                                            processed_text
-                                        },
-                                        Err(e) => {
-                                            DebugLogger::log_translation_response(false, None, Some(&e), None);
-                                            DebugLogger::log_pipeline_error("translation", &e);
-                                            let _ = app_single.emit("processing-error", format!("Translation Error - Using fallback: {}", e));
-
-                                            // FALLBACK: Use raw transcription as final (don't leave empty)
-                                            let _ = app_single.emit("transcribed-text", serde_json::json!({
-                                                "raw": transcription,
-                                                "final": transcription // Use raw as fallback
-                                            }));
-                                            DebugLogger::log_info("EMIT: Sent raw transcription as fallback final text");
-
-                                            transcription.clone()
-                                        }
-                                    }
-                                } else {
-                                    // No translation service - just send raw transcription as final
+                                // Check if transcription is empty (silence)
+                                if transcription.trim().is_empty() {
+                                    DebugLogger::log_info("Transcription is empty (silence) - skipping translation/processing");
+                                    
+                                    // Emit empty final result
                                     let _ = app_single.emit("transcribed-text", serde_json::json!({
-                                        "raw": transcription,
-                                        "final": transcription
+                                        "raw": "",
+                                        "final": ""
                                     }));
-                                    DebugLogger::log_info("EMIT: Sent raw transcription as final (no translation service)");
-
-                                    transcription.clone()
-                                };
-
-                                // CLEAR PROCESSING STATUS after completion
-                                let _ = app_single.emit("processing-status", serde_json::json!({"status": ""}));
-                                
-                                // In single recording mode, the recording has already stopped, so insert text
-                                if settings_single.text_insertion_enabled {
-                                    DebugLogger::log_info("TEXT_INSERTION: queueing complete transcription for insertion (single mode - recording already stopped)");
-                                    if let Err(e) = text_insertion_tx_single.send(final_text.clone()) {
-                                        DebugLogger::log_pipeline_error("text_insertion", &format!("failed to queue complete transcription: {}", e));
-                                    } else {
-                                        DebugLogger::log_text_insertion(&final_text, true, None);
-                                        DebugLogger::log_info("TEXT_INSERTION: queued complete transcription");
-                                    }
+                                    
+                                    // Clear processing status
+                                    let _ = app_single.emit("processing-status", serde_json::json!({"status": ""}));
+                                    
+                                    // Skip text insertion
+                                    DebugLogger::log_info("TEXT_INSERTION: skipped (empty transcription)");
                                 } else {
-                                    DebugLogger::log_info("TEXT_INSERTION: skipped (text insertion disabled)");
+                                    // Emit processing progress to show translation is happening
+                                    let _ = app_single.emit("processing-status", serde_json::json!({"status": "translating"}));
+
+                                    // Now do translation/correction in background and emit update when done
+                                    let final_text = if let Some(ref translation_service) = translation_service_single {
+                                        match translation_service.process_text(
+                                            &transcription,
+                                            &settings_single.spoken_language,
+                                            &settings_single.translation_language,
+                                            settings_single.translation_enabled
+                                        ).await {
+                                            Ok(processed_text) => {
+                                                DebugLogger::log_translation_response(true, Some(&processed_text), None, None);
+
+                                                // EMIT FINAL PROCESSED TEXT
+                                                let _ = app_single.emit("transcribed-text", serde_json::json!({
+                                                    "raw": transcription,
+                                                    "final": processed_text
+                                                }));
+                                                DebugLogger::log_info("EMIT: Sent final processed text to frontend");
+
+                                                processed_text
+                                            },
+                                            Err(e) => {
+                                                DebugLogger::log_translation_response(false, None, Some(&e), None);
+                                                DebugLogger::log_pipeline_error("translation", &e);
+                                                let _ = app_single.emit("processing-error", format!("Translation Error - Using fallback: {}", e));
+
+                                                // FALLBACK: Use raw transcription as final (don't leave empty)
+                                                let _ = app_single.emit("transcribed-text", serde_json::json!({
+                                                    "raw": transcription,
+                                                    "final": transcription // Use raw as fallback
+                                                }));
+                                                DebugLogger::log_info("EMIT: Sent raw transcription as fallback final text");
+
+                                                transcription.clone()
+                                            }
+                                        }
+                                    } else {
+                                        // No translation service - just send raw transcription as final
+                                        let _ = app_single.emit("transcribed-text", serde_json::json!({
+                                            "raw": transcription,
+                                            "final": transcription
+                                        }));
+                                        DebugLogger::log_info("EMIT: Sent raw transcription as final (no translation service)");
+
+                                        transcription.clone()
+                                    };
+
+                                    // CLEAR PROCESSING STATUS after completion
+                                    let _ = app_single.emit("processing-status", serde_json::json!({"status": ""}));
+                                    
+                                    // In single recording mode, the recording has already stopped, so insert text
+                                    if settings_single.text_insertion_enabled {
+                                        DebugLogger::log_info("TEXT_INSERTION: queueing complete transcription for insertion (single mode - recording already stopped)");
+                                        if let Err(e) = text_insertion_tx_single.send(final_text.clone()) {
+                                            DebugLogger::log_pipeline_error("text_insertion", &format!("failed to queue complete transcription: {}", e));
+                                        } else {
+                                            DebugLogger::log_text_insertion(&final_text, true, None);
+                                            DebugLogger::log_info("TEXT_INSERTION: queued complete transcription");
+                                        }
+                                    } else {
+                                        DebugLogger::log_info("TEXT_INSERTION: skipped (text insertion disabled)");
+                                    }
                                 }
                                 
                                 // Note: transcribed-text events already emitted above at each stage
@@ -1969,7 +2044,9 @@ pub fn run() {
             update_persistent_setting,
             get_hotkey_fsm_state,
             reset_hotkey_fsm,
-            set_hotkey_fsm_recording
+            set_hotkey_fsm_recording,
+            confirm_recording,
+            cancel_recording
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

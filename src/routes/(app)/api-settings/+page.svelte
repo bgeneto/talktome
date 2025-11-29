@@ -1,7 +1,7 @@
 <script lang="ts">
   import { onMount } from "svelte";
   import { get } from "svelte/store";
-  import { settings, type Settings } from "../../lib/stores/settingsStore";
+  import { settings, type Settings } from "$lib/stores/settingsStore";
 
   // Initialize from store instead of hardcoded defaults
   const initialSettings: Settings = get(settings);
