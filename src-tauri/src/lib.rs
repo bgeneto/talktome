@@ -2,6 +2,7 @@ use tauri::{
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
     menu::{MenuBuilder, MenuItemBuilder},
     Manager, Emitter, AppHandle, State,
+    WebviewUrl, WebviewWindowBuilder,
 };
 use tauri_plugin_global_shortcut::{Code, Modifiers, Shortcut, ShortcutState, GlobalShortcutExt};
 use tauri_plugin_notification::NotificationExt;
@@ -318,7 +319,7 @@ async fn register_hotkeys(
                 match (normalized, ev.state) {
                     // Hands-free: Only process key press (ignore release)
                     ("hands_free", ShortcutState::Pressed) => {
-                        // Use FSM to toggle state with debouncing
+                        // Use FSM to check current state with debouncing
                         if let Some(fsm) = app_handle.try_state::<HotkeySMState>() {
                             match fsm.try_toggle() {
                                 Ok(Some(new_state)) => {
@@ -326,7 +327,22 @@ async fn register_hotkeys(
                                         "HOTKEY_FSM_TOGGLE: action=hands_free, new_state={:?}, ts_ms={}",
                                         new_state, ts_ms
                                     ));
-                                    let _ = app_for_emit.emit("toggle-recording-from-hotkey", ());
+                                    
+                                    // If transitioning TO Recording, show confirmation dialog
+                                    // If transitioning TO Idle (stopping), emit toggle directly
+                                    match new_state {
+                                        hotkey_fsm::RecordingState::Recording => {
+                                            // Revert FSM state since we haven't confirmed yet
+                                            let _ = fsm.force_set_state(hotkey_fsm::RecordingState::Idle);
+                                            DebugLogger::log_info("HOTKEY: Showing confirmation dialog before starting recording");
+                                            // Show confirmation dialog
+                                            let _ = app_for_emit.emit("show-recording-confirmation", ());
+                                        }
+                                        hotkey_fsm::RecordingState::Idle => {
+                                            // Stopping recording - no confirmation needed
+                                            let _ = app_for_emit.emit("toggle-recording-from-hotkey", ());
+                                        }
+                                    }
                                 }
                                 Ok(None) => {
                                     DebugLogger::log_info(&format!(
@@ -342,8 +358,8 @@ async fn register_hotkeys(
                                 }
                             }
                         } else {
-                            DebugLogger::log_info("FSM not available, fallback to event emit");
-                            let _ = app_for_emit.emit("toggle-recording-from-hotkey", ());
+                            DebugLogger::log_info("FSM not available, showing confirmation dialog");
+                            let _ = app_for_emit.emit("show-recording-confirmation", ());
                         }
                     }
                     _ => {
@@ -372,6 +388,50 @@ async fn register_hotkeys(
         *reg = hotkeys;
     }
     
+    Ok(())
+}
+
+// Command to show recording confirmation dialog (always-on-top window)
+#[tauri::command]
+async fn show_recording_confirmation(app: AppHandle) -> Result<(), String> {
+    DebugLogger::log_info("show_recording_confirmation: Creating confirmation dialog window");
+    
+    // Check if confirmation window already exists
+    if app.get_webview_window("confirm-recording").is_some() {
+        DebugLogger::log_info("Confirmation window already exists, focusing it");
+        if let Some(window) = app.get_webview_window("confirm-recording") {
+            let _ = window.set_focus();
+        }
+        return Ok(());
+    }
+    
+    // Get the URL for the confirmation page
+    // In dev mode, use localhost; in production, use the app URL
+    let confirm_url = if cfg!(debug_assertions) {
+        WebviewUrl::External("http://localhost:1420/confirm-recording".parse().unwrap())
+    } else {
+        WebviewUrl::App("confirm-recording/index.html".into())
+    };
+    
+    // Create a small, always-on-top, borderless confirmation window
+    let _confirm_window = WebviewWindowBuilder::new(
+        &app,
+        "confirm-recording",
+        confirm_url
+    )
+    .title("Confirm Recording")
+    .inner_size(380.0, 80.0)
+    .center()
+    .always_on_top(true)
+    .decorations(false)
+    .resizable(false)
+    .skip_taskbar(true)
+    .focused(true)
+    .transparent(true)
+    .build()
+    .map_err(|e| format!("Failed to create confirmation window: {}", e))?;
+    
+    DebugLogger::log_info("Confirmation dialog window created successfully");
     Ok(())
 }
 
@@ -1964,6 +2024,7 @@ pub fn run() {
             test_hotkey_parsing,
             show_recording_started_notification,
             show_recording_stopped_notification,
+            show_recording_confirmation,
             load_persistent_settings,
             save_persistent_settings,
             update_persistent_setting,

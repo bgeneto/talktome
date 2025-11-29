@@ -60,6 +60,9 @@
   let unlistenRecordingStarted: () => void = () => {};
   let unlistenRecordingTimeout: () => void = () => {};
   let unlistenProcessingStatus: () => void = () => {};
+  let unlistenShowConfirmation: () => void = () => {};
+  let unlistenConfirmAccepted: () => void = () => {};
+  let unlistenConfirmCancelled: () => void = () => {};
 
   // Flag to indicate the previous transcription session ended. We only
   // clear accumulated UI text when starting a new session after the prior
@@ -361,6 +364,30 @@
           console.log("Processing status update:", processingStatus);
         }
       });
+
+      // Listen for show-recording-confirmation event (triggered by hotkey when starting)
+      unlistenShowConfirmation = await listen("show-recording-confirmation", async () => {
+        console.log("show-recording-confirmation event received, opening confirmation dialog");
+        try {
+          await invoke("show_recording_confirmation");
+        } catch (error) {
+          console.error("Failed to show confirmation dialog:", error);
+          // Fallback: start recording directly if dialog fails
+          startRecording();
+        }
+      });
+
+      // Listen for confirmation accepted event (user clicked Start in confirmation dialog)
+      unlistenConfirmAccepted = await listen("confirm-recording-accepted", async () => {
+        console.log("confirm-recording-accepted event received, starting recording");
+        startRecording();
+      });
+
+      // Listen for confirmation cancelled event (user clicked Cancel or timeout in confirmation dialog)
+      unlistenConfirmCancelled = await listen("confirm-recording-cancelled", () => {
+        console.log("confirm-recording-cancelled event received, not starting recording");
+        // No action needed - recording was not started
+      });
     })();
 
     return () => {
@@ -374,6 +401,9 @@
       unlistenRecordingStarted();
       unlistenRecordingTimeout();
       unlistenProcessingStatus();
+      unlistenShowConfirmation();
+      unlistenConfirmAccepted();
+      unlistenConfirmCancelled();
     };
   });
 
