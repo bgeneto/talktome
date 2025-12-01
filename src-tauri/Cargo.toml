@@ -1,9 +1,9 @@
 [package]
 name = "talktome"
-version = "0.4.6"
+version = "0.4.7"
 description = "Voice to Text with Translation"
 authors = ["bgeneto"]
-edition = "2024"
+edition = "2021"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
@@ -24,6 +24,7 @@ tauri-plugin-global-shortcut = "2"
 tauri-plugin-stronghold = "2"
 tauri-plugin-notification = "2"
 tauri-plugin-store = "2"
+tauri-plugin-single-instance = "2.3.6"
 keyring = "1.2"
 whoami = "1"
 serde = { version = "1", features = ["derive"] }

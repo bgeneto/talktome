@@ -1,6 +1,6 @@
 <script lang="ts">
-  let appVersion = "0.4.6";
-  let buildDate = "2025-11-29";
+  let appVersion = "0.4.7";
+  let buildDate = "2025-12-01";
   let platform = "Windows";
   let architecture = "x64";
   let developer = "bgeneto";
